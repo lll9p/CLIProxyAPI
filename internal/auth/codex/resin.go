@@ -108,7 +108,7 @@ func resolveResinRoute(cfg *config.Config, account string, rawTarget string, web
 		return nil, fmt.Errorf("target URL missing scheme/host")
 	}
 
-	clientScheme, targetProtocol, errScheme := resinTargetProtocol(target.Scheme, websocket)
+	clientScheme, targetProtocol, errScheme := resinTargetProtocol(resinBase.Scheme, target.Scheme, websocket)
 	if errScheme != nil {
 		return nil, errScheme
 	}
@@ -125,31 +125,33 @@ func resolveResinRoute(cfg *config.Config, account string, rawTarget string, web
 	}, nil
 }
 
-func resinTargetProtocol(targetScheme string, websocket bool) (string, string, error) {
-	switch strings.ToLower(strings.TrimSpace(targetScheme)) {
-	case "http":
-		if websocket {
-			return "ws", "http", nil
-		}
-		return "http", "http", nil
-	case "https":
-		if websocket {
-			return "ws", "https", nil
-		}
-		return "https", "https", nil
-	case "ws":
-		if websocket {
-			return "ws", "http", nil
-		}
-	case "wss":
-		if websocket {
-			return "ws", "https", nil
-		}
-	}
+func resinTargetProtocol(resinScheme string, targetScheme string, websocket bool) (string, string, error) {
+	resinScheme = strings.ToLower(strings.TrimSpace(resinScheme))
+	targetScheme = strings.ToLower(strings.TrimSpace(targetScheme))
+
 	if websocket {
-		return "", "", fmt.Errorf("unsupported websocket target scheme: %s", targetScheme)
+		switch targetScheme {
+		case "http", "ws":
+			return "ws", "http", nil
+		case "https", "wss":
+			return "ws", "https", nil
+		default:
+			return "", "", fmt.Errorf("unsupported websocket target scheme: %s", targetScheme)
+		}
 	}
-	return "", "", fmt.Errorf("unsupported HTTP target scheme: %s", targetScheme)
+
+	if resinScheme != "http" && resinScheme != "https" {
+		return "", "", fmt.Errorf("unsupported Resin scheme for HTTP routing: %s", resinScheme)
+	}
+
+	switch targetScheme {
+	case "http":
+		return resinScheme, "http", nil
+	case "https":
+		return resinScheme, "https", nil
+	default:
+		return "", "", fmt.Errorf("unsupported HTTP target scheme: %s", targetScheme)
+	}
 }
 
 func buildResinRoutePath(basePath string, platform string, protocol string, host string, targetPath string) string {
