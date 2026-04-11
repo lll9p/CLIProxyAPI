@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -64,9 +65,33 @@ const (
 	refreshMaxConcurrency = 16
 	refreshPendingBackoff = time.Minute
 	refreshFailureBackoff = 5 * time.Minute
+	codexRefreshMinDelay  = time.Minute
+	codexRefreshMaxDelay  = 5 * time.Minute
+	codexRefreshMinSpace  = 20 * time.Minute
+	codexRefreshExpiryLead = 25 * time.Minute
+	codexRefreshQueueSize = 1024
 	quotaBackoffBase      = time.Second
 	quotaBackoffMax       = 30 * time.Minute
 )
+
+type codexRefreshPhase uint8
+
+const (
+	codexRefreshPhasePlanned codexRefreshPhase = iota + 1
+	codexRefreshPhaseQueued
+	codexRefreshPhaseRunning
+)
+
+type codexRefreshWork struct {
+	ID         string
+	Generation uint64
+}
+
+type codexRefreshState struct {
+	Generation uint64
+	PlannedAt  time.Time
+	Phase      codexRefreshPhase
+}
 
 var quotaCooldownDisabled atomic.Bool
 
@@ -162,8 +187,11 @@ type Manager struct {
 	rtProvider RoundTripperProvider
 
 	// Auto refresh state
-	refreshCancel    context.CancelFunc
-	refreshSemaphore chan struct{}
+	refreshCancel          context.CancelFunc
+	refreshSemaphore       chan struct{}
+	codexRefreshGeneration uint64
+	codexRefreshQueue      chan codexRefreshWork
+	codexRefreshStates     map[string]codexRefreshState
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -175,14 +203,15 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:            store,
-		executors:        make(map[string]ProviderExecutor),
-		selector:         selector,
-		hook:             hook,
-		auths:            make(map[string]*Auth),
-		providerOffsets:  make(map[string]int),
-		modelPoolOffsets: make(map[string]int),
-		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
+		store:              store,
+		executors:          make(map[string]ProviderExecutor),
+		selector:           selector,
+		hook:               hook,
+		auths:              make(map[string]*Auth),
+		providerOffsets:    make(map[string]int),
+		modelPoolOffsets:   make(map[string]int),
+		refreshSemaphore:   make(chan struct{}, refreshMaxConcurrency),
+		codexRefreshStates: make(map[string]codexRefreshState),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -2896,6 +2925,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	}
 	ctx, cancel := context.WithCancel(parent)
 	m.refreshCancel = cancel
+	m.restartCodexRefreshLoop(ctx)
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -2917,6 +2947,207 @@ func (m *Manager) StopAutoRefresh() {
 		m.refreshCancel()
 		m.refreshCancel = nil
 	}
+	m.stopCodexRefreshLoop()
+}
+
+func (m *Manager) restartCodexRefreshLoop(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	m.codexRefreshGeneration++
+	m.resetCodexRefreshStateLocked()
+	generation := m.codexRefreshGeneration
+	queue := make(chan codexRefreshWork, codexRefreshQueueSize)
+	m.codexRefreshQueue = queue
+	m.codexRefreshStates = make(map[string]codexRefreshState)
+	m.mu.Unlock()
+	go m.runCodexRefreshWorker(ctx, generation, queue)
+}
+
+func (m *Manager) ensureCodexRefreshLoop(ctx context.Context) (uint64, chan codexRefreshWork) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	if m.codexRefreshQueue != nil {
+		generation := m.codexRefreshGeneration
+		queue := m.codexRefreshQueue
+		m.mu.Unlock()
+		return generation, queue
+	}
+	m.codexRefreshGeneration++
+	generation := m.codexRefreshGeneration
+	queue := make(chan codexRefreshWork, codexRefreshQueueSize)
+	m.codexRefreshQueue = queue
+	m.codexRefreshStates = make(map[string]codexRefreshState)
+	m.mu.Unlock()
+	go m.runCodexRefreshWorker(ctx, generation, queue)
+	return generation, queue
+}
+
+func (m *Manager) stopCodexRefreshLoop() {
+	m.mu.Lock()
+	m.codexRefreshGeneration++
+	m.resetCodexRefreshStateLocked()
+	m.codexRefreshQueue = nil
+	m.codexRefreshStates = make(map[string]codexRefreshState)
+	m.mu.Unlock()
+}
+
+func (m *Manager) resetCodexRefreshStateLocked() {
+	for id, state := range m.codexRefreshStates {
+		auth := m.auths[id]
+		if auth == nil || !auth.NextRefreshAfter.Equal(state.PlannedAt) {
+			continue
+		}
+		auth.NextRefreshAfter = time.Time{}
+		m.auths[id] = auth
+	}
+}
+
+func (m *Manager) runCodexRefreshWorker(ctx context.Context, generation uint64, queue <-chan codexRefreshWork) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case work, ok := <-queue:
+			if !ok {
+				return
+			}
+			if work.Generation != generation {
+				continue
+			}
+			if ctx.Err() != nil {
+				m.clearCodexRefreshState(work, codexRefreshPhaseQueued)
+				return
+			}
+			if !m.advanceCodexRefreshState(work, codexRefreshPhaseQueued, codexRefreshPhaseRunning) {
+				continue
+			}
+			if ctx.Err() != nil {
+				m.clearCodexRefreshState(work, codexRefreshPhaseRunning)
+				return
+			}
+			m.refreshAuth(ctx, work.ID)
+			m.clearCodexRefreshState(work, codexRefreshPhaseRunning)
+		}
+	}
+}
+
+func (m *Manager) scheduleCodexRefresh(ctx context.Context, id string, now time.Time) (time.Time, bool) {
+	generation, queue := m.ensureCodexRefreshLoop(ctx)
+	plannedAt, ok := m.markCodexRefreshPlanned(id, now, generation)
+	if !ok {
+		return time.Time{}, false
+	}
+	work := codexRefreshWork{ID: id, Generation: generation}
+	go m.dispatchCodexRefreshAt(ctx, work, plannedAt, queue)
+	return plannedAt, true
+}
+
+func (m *Manager) dispatchCodexRefreshAt(ctx context.Context, work codexRefreshWork, plannedAt time.Time, queue chan<- codexRefreshWork) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if delay := time.Until(plannedAt); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer func() {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}()
+		select {
+		case <-ctx.Done():
+			m.clearCodexRefreshState(work, codexRefreshPhasePlanned)
+			return
+		case <-timer.C:
+		}
+	}
+	if ctx.Err() != nil {
+		m.clearCodexRefreshState(work, codexRefreshPhasePlanned)
+		return
+	}
+	if !m.advanceCodexRefreshState(work, codexRefreshPhasePlanned, codexRefreshPhaseQueued) {
+		return
+	}
+	if ctx.Err() != nil {
+		m.clearCodexRefreshState(work, codexRefreshPhaseQueued)
+		return
+	}
+	select {
+	case <-ctx.Done():
+		m.clearCodexRefreshState(work, codexRefreshPhaseQueued)
+		return
+	case queue <- work:
+	}
+}
+
+func (m *Manager) advanceCodexRefreshState(work codexRefreshWork, from codexRefreshPhase, to codexRefreshPhase) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state, ok := m.codexRefreshStates[work.ID]
+	if !ok || state.Generation != work.Generation || state.Phase != from {
+		return false
+	}
+	state.Phase = to
+	m.codexRefreshStates[work.ID] = state
+	return true
+}
+
+func (m *Manager) clearCodexRefreshState(work codexRefreshWork, phase codexRefreshPhase) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state, ok := m.codexRefreshStates[work.ID]
+	if !ok || state.Generation != work.Generation || state.Phase != phase {
+		return
+	}
+	delete(m.codexRefreshStates, work.ID)
+	if auth := m.auths[work.ID]; auth != nil && auth.NextRefreshAfter.Equal(state.PlannedAt) {
+		auth.NextRefreshAfter = time.Time{}
+		m.auths[work.ID] = auth
+	}
+	if m.scheduler != nil {
+		if auth := m.auths[work.ID]; auth != nil {
+			m.scheduler.upsertAuth(auth.Clone())
+		}
+	}
+}
+
+func (m *Manager) markCodexRefreshPlanned(id string, now time.Time, generation uint64) (time.Time, bool) {
+	plannedAt := now.Add(codexRefreshDelay(id))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	auth, ok := m.auths[id]
+	if !ok || auth == nil || auth.Disabled || !isCodexProvider(auth.Provider) {
+		return time.Time{}, false
+	}
+	if state, ok := m.codexRefreshStates[id]; ok && state.Generation == generation {
+		return time.Time{}, false
+	}
+	if !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
+		return time.Time{}, false
+	}
+	if !codexShouldRefresh(auth, now) {
+		return time.Time{}, false
+	}
+	auth.NextRefreshAfter = plannedAt
+	m.auths[id] = auth
+	m.codexRefreshStates[id] = codexRefreshState{
+		Generation: generation,
+		PlannedAt:  plannedAt,
+		Phase:      codexRefreshPhasePlanned,
+	}
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(auth.Clone())
+	}
+	return plannedAt, true
 }
 
 func (m *Manager) checkRefreshes(ctx context.Context) {
@@ -2929,11 +3160,18 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 			if !m.shouldRefresh(a, now) {
 				continue
 			}
-			log.Debugf("checking refresh for %s, %s, %s", a.Provider, a.ID, typ)
 
 			if exec := m.executorFor(a.Provider); exec == nil {
 				continue
 			}
+			if isCodexProvider(a.Provider) {
+				plannedAt, ok := m.scheduleCodexRefresh(ctx, a.ID, now)
+				if ok {
+					log.Debugf("scheduled codex refresh for %s at %s", a.ID, plannedAt.Format(time.RFC3339))
+				}
+				continue
+			}
+			log.Debugf("checking refresh for %s, %s, %s", a.Provider, a.ID, typ)
 			if !m.markRefreshPending(a.ID, now) {
 				continue
 			}
@@ -2973,18 +3211,14 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
 		return false
 	}
+	lastRefresh := authEffectiveLastRefreshTimestamp(a)
+	expiry, hasExpiry := a.ExpirationTime()
+	if isCodexProvider(a.Provider) && !codexShouldRefreshAt(a.Provider, lastRefresh, expiry, hasExpiry, now) {
+		return false
+	}
 	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
 		return evaluator.ShouldRefresh(now, a)
 	}
-
-	lastRefresh := a.LastRefreshedAt
-	if lastRefresh.IsZero() {
-		if ts, ok := authLastRefreshTimestamp(a); ok {
-			lastRefresh = ts
-		}
-	}
-
-	expiry, hasExpiry := a.ExpirationTime()
 
 	if interval := authPreferredInterval(a); interval > 0 {
 		if hasExpiry && !expiry.IsZero() {
@@ -3158,6 +3392,62 @@ func authLastRefreshTimestamp(a *Auth) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+func authEffectiveLastRefreshTimestamp(a *Auth) time.Time {
+	if a == nil {
+		return time.Time{}
+	}
+	if !a.LastRefreshedAt.IsZero() {
+		return a.LastRefreshedAt
+	}
+	if ts, ok := authLastRefreshTimestamp(a); ok {
+		return ts
+	}
+	return time.Time{}
+}
+
+func isCodexProvider(provider string) bool {
+	return strings.EqualFold(strings.TrimSpace(provider), "codex")
+}
+
+func codexShouldRefresh(a *Auth, now time.Time) bool {
+	if a == nil {
+		return false
+	}
+	lastRefresh := authEffectiveLastRefreshTimestamp(a)
+	expiry, hasExpiry := a.ExpirationTime()
+	return codexShouldRefreshAt(a.Provider, lastRefresh, expiry, hasExpiry, now)
+}
+
+func codexShouldRefreshAt(provider string, lastRefresh, expiry time.Time, hasExpiry bool, now time.Time) bool {
+	if !isCodexProvider(provider) {
+		return true
+	}
+	dueByExpiry := false
+	if hasExpiry && !expiry.IsZero() {
+		if !expiry.After(now) {
+			return true
+		}
+		dueByExpiry = expiry.Sub(now) <= codexRefreshExpiryLead
+	}
+	if lastRefresh.IsZero() {
+		if hasExpiry && !expiry.IsZero() {
+			return dueByExpiry
+		}
+		return true
+	}
+	return dueByExpiry || !now.Before(lastRefresh.Add(codexRefreshMinSpace))
+}
+
+func codexRefreshDelay(id string) time.Duration {
+	spreadSeconds := int64((codexRefreshMaxDelay - codexRefreshMinDelay) / time.Second)
+	if spreadSeconds <= 0 {
+		return codexRefreshMinDelay
+	}
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(strings.TrimSpace(id)))
+	return codexRefreshMinDelay + time.Duration(int64(hasher.Sum32())%(spreadSeconds+1))*time.Second
 }
 
 func lookupMetadataTime(meta map[string]any, keys ...string) (time.Time, bool) {

@@ -31,14 +31,30 @@ const (
 // It manages the HTTP client and provides methods for generating authorization URLs,
 // exchanging authorization codes for tokens, and refreshing access tokens.
 type CodexAuth struct {
-	httpClient *http.Client
+	cfg              *config.Config
+	httpClient       *http.Client
+	directHTTPClient *http.Client
+	resinAccount     string
 }
 
 // NewCodexAuth creates a new CodexAuth service instance.
 // It initializes an HTTP client with proxy settings from the provided configuration.
 func NewCodexAuth(cfg *config.Config) *CodexAuth {
+	return NewCodexAuthWithResinAccount(cfg, "")
+}
+
+// NewCodexAuthWithResinAccount creates a new CodexAuth service instance with an optional
+// stable Resin account used for reverse-proxied refresh requests.
+func NewCodexAuthWithResinAccount(cfg *config.Config, resinAccount string) *CodexAuth {
+	httpClient := &http.Client{}
+	if cfg != nil {
+		httpClient = util.SetProxy(&cfg.SDKConfig, httpClient)
+	}
 	return &CodexAuth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+		cfg:              cfg,
+		httpClient:       httpClient,
+		directHTTPClient: NewDirectHTTPClient(),
+		resinAccount:     strings.TrimSpace(resinAccount),
 	}
 }
 
@@ -102,7 +118,12 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := o.httpClient.Do(req)
+	httpClient, err := o.httpClientForRequest(req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token exchange request failed: %w", err)
 	}
@@ -188,7 +209,12 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := o.httpClient.Do(req)
+	httpClient, err := o.httpClientForRequest(req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token refresh request failed: %w", err)
 	}
@@ -306,4 +332,24 @@ func (o *CodexAuth) UpdateTokenStorage(storage *CodexTokenStorage, tokenData *Co
 	storage.LastRefresh = time.Now().Format(time.RFC3339)
 	storage.Email = tokenData.Email
 	storage.Expire = tokenData.Expire
+}
+
+func (o *CodexAuth) httpClientForRequest(req *http.Request) (*http.Client, error) {
+	if o == nil {
+		return &http.Client{}, nil
+	}
+	resinApplied, err := ApplyResinReverseProxyForAccount(req, o.cfg, o.resinAccount)
+	if err != nil {
+		return nil, err
+	}
+	if resinApplied {
+		if o.directHTTPClient != nil {
+			return o.directHTTPClient, nil
+		}
+		return NewDirectHTTPClient(), nil
+	}
+	if o.httpClient != nil {
+		return o.httpClient, nil
+	}
+	return &http.Client{}, nil
 }

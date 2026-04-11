@@ -70,6 +70,11 @@ usage-statistics-enabled: false
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
 
+# Optional: Codex prefers Resin reverse proxy when both values are set and the auth has a stable identity.
+# When Resin is not configured, Codex keeps the existing proxy-url behavior.
+# resin-url: "http://127.0.0.1:2260/my-token"
+# resin-platform-name: "openai"
+
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 
@@ -148,6 +153,8 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
+#     # When resin-url and resin-platform-name are configured globally, Codex HTTP/WebSocket/OAuth refresh
+#     # requests prefer Resin reverse proxy and skip this proxy-url for those Resin-routed requests.
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override

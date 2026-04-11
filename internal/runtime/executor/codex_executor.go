@@ -75,7 +75,11 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	resinApplied, err := codexauth.ApplyResinReverseProxy(httpReq, e.cfg, auth)
+	if err != nil {
+		return nil, err
+	}
+	httpClient := newCodexHTTPClient(ctx, e.cfg, auth, resinApplied)
 	return httpClient.Do(httpReq)
 }
 
@@ -124,14 +128,19 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	resinApplied, err := codexauth.ApplyResinReverseProxy(httpReq, e.cfg, auth)
+	if err != nil {
+		return resp, err
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
+	requestURL := httpReq.URL.String()
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
+		URL:       requestURL,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
 		Body:      body,
@@ -141,7 +150,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newCodexHTTPClient(ctx, e.cfg, auth, resinApplied)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -270,14 +279,19 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
+	resinApplied, err := codexauth.ApplyResinReverseProxy(httpReq, e.cfg, auth)
+	if err != nil {
+		return resp, err
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
+	requestURL := httpReq.URL.String()
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
+		URL:       requestURL,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
 		Body:      body,
@@ -287,7 +301,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newCodexHTTPClient(ctx, e.cfg, auth, resinApplied)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -364,14 +378,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	resinApplied, err := codexauth.ApplyResinReverseProxy(httpReq, e.cfg, auth)
+	if err != nil {
+		return nil, err
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
+	requestURL := httpReq.URL.String()
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
+		URL:       requestURL,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
 		Body:      body,
@@ -382,7 +401,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newCodexHTTPClient(ctx, e.cfg, auth, resinApplied)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -612,7 +631,8 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if refreshToken == "" {
 		return auth, nil
 	}
-	svc := codexauth.NewCodexAuth(e.cfg)
+	resinAccount := codexauth.StableResinAccount(auth)
+	svc := codexauth.NewCodexAuthWithResinAccount(e.cfg, resinAccount)
 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
 		return nil, err
@@ -635,6 +655,13 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+func newCodexHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, resinApplied bool) *http.Client {
+	if resinApplied {
+		return codexauth.NewDirectHTTPClient()
+	}
+	return helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
 }
 
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {

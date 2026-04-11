@@ -1,11 +1,13 @@
-name: docker-image
+name: docker-image-alt
 
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - v*
 
 env:
   APP_NAME: CLIProxyAPI
-  DOCKERHUB_REPO: eceasy/cli-proxy-api
+  DOCKERHUB_REPO: lll9p/cli-proxy-api
 
 jobs:
   docker_amd64:

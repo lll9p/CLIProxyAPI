@@ -9,6 +9,12 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ResinURL is the Resin reverse proxy base URL used by Codex when configured.
+	ResinURL string `yaml:"resin-url,omitempty" json:"resin-url,omitempty"`
+
+	// ResinPlatformName is the Resin platform segment used by Codex reverse proxy routing.
+	ResinPlatformName string `yaml:"resin-platform-name,omitempty" json:"resin-platform-name,omitempty"`
+
 	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.
 	// Default is false for safety; when false, /v1internal:* requests are rejected.
 	EnableGeminiCLIEndpoint bool `yaml:"enable-gemini-cli-endpoint" json:"enable-gemini-cli-endpoint"`

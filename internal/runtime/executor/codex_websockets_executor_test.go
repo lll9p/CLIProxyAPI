@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -283,9 +284,58 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 	dialer := newProxyAwareWebsocketDialer(
 		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
 		&cliproxyauth.Auth{ProxyURL: "direct"},
+		false,
 	)
 
 	if dialer.Proxy != nil {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
+	}
+}
+
+func TestPrepareCodexWebsocketTargetAppliesResinRoute(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	cfg.ResinURL = "http://127.0.0.1:2260/my-token"
+	cfg.ResinPlatformName = "openai"
+	headers := http.Header{"OpenAI-Beta": []string{codexResponsesWebsocketBetaHeaderValue}}
+
+	wsURL, gotHeaders, resinApplied, err := prepareCodexWebsocketTarget(
+		cfg,
+		&cliproxyauth.Auth{FileName: "codex-user.json"},
+		"wss://chatgpt.com/backend-api/codex/responses?trace=1",
+		headers,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexWebsocketTarget() error = %v", err)
+	}
+	if !resinApplied {
+		t.Fatal("expected Resin websocket target to be applied")
+	}
+	if wsURL != "ws://127.0.0.1:2260/my-token/openai/https/chatgpt.com/backend-api/codex/responses?trace=1" {
+		t.Fatalf("wsURL = %q", wsURL)
+	}
+	if got := gotHeaders.Get(codexauth.ResinAccountHeader); got != "codex-user.json" {
+		t.Fatalf("%s = %q, want %q", codexauth.ResinAccountHeader, got, "codex-user.json")
+	}
+	if got := gotHeaders.Get("OpenAI-Beta"); got != codexResponsesWebsocketBetaHeaderValue {
+		t.Fatalf("OpenAI-Beta = %q, want %q", got, codexResponsesWebsocketBetaHeaderValue)
+	}
+	if headers.Get(codexauth.ResinAccountHeader) != "" {
+		t.Fatal("expected original headers to remain unchanged")
+	}
+}
+
+func TestNewProxyAwareWebsocketDialerResinDisablesConfiguredProxy(t *testing.T) {
+	t.Parallel()
+
+	dialer := newProxyAwareWebsocketDialer(
+		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
+		&cliproxyauth.Auth{ProxyURL: "http://auth-proxy.example.com:9000"},
+		true,
+	)
+
+	if dialer.Proxy != nil {
+		t.Fatal("expected websocket proxy function to be nil when Resin routing is active")
 	}
 }
