@@ -632,7 +632,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 		return auth, nil
 	}
 	resinAccount := codexauth.StableResinAccount(auth)
-	svc := codexauth.NewCodexAuthWithResinAccount(e.cfg, resinAccount)
+	svc := codexauth.NewCodexAuthWithProxyURLAndResinAccount(e.cfg, auth.ProxyURL, resinAccount)
 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
 		return nil, err

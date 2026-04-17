@@ -40,19 +40,36 @@ type CodexAuth struct {
 // NewCodexAuth creates a new CodexAuth service instance.
 // It initializes an HTTP client with proxy settings from the provided configuration.
 func NewCodexAuth(cfg *config.Config) *CodexAuth {
-	return NewCodexAuthWithResinAccount(cfg, "")
+	return NewCodexAuthWithProxyURLAndResinAccount(cfg, "", "")
 }
 
 // NewCodexAuthWithResinAccount creates a new CodexAuth service instance with an optional
 // stable Resin account used for reverse-proxied refresh requests.
 func NewCodexAuthWithResinAccount(cfg *config.Config, resinAccount string) *CodexAuth {
-	httpClient := &http.Client{}
+	return NewCodexAuthWithProxyURLAndResinAccount(cfg, "", resinAccount)
+}
+
+// NewCodexAuthWithProxyURL creates a new CodexAuth service instance.
+// proxyURL takes precedence over cfg.ProxyURL when non-empty.
+func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
+	return NewCodexAuthWithProxyURLAndResinAccount(cfg, proxyURL, "")
+}
+
+// NewCodexAuthWithProxyURLAndResinAccount creates a new CodexAuth service instance.
+// proxyURL takes precedence over cfg.ProxyURL when non-empty.
+func NewCodexAuthWithProxyURLAndResinAccount(cfg *config.Config, proxyURL string, resinAccount string) *CodexAuth {
+	effectiveProxyURL := strings.TrimSpace(proxyURL)
+	var sdkCfg config.SDKConfig
 	if cfg != nil {
-		httpClient = util.SetProxy(&cfg.SDKConfig, httpClient)
+		sdkCfg = cfg.SDKConfig
+		if effectiveProxyURL == "" {
+			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
+		}
 	}
+	sdkCfg.ProxyURL = effectiveProxyURL
 	return &CodexAuth{
 		cfg:              cfg,
-		httpClient:       httpClient,
+		httpClient:       util.SetProxy(&sdkCfg, &http.Client{}),
 		directHTTPClient: NewDirectHTTPClient(),
 		resinAccount:     strings.TrimSpace(resinAccount),
 	}
