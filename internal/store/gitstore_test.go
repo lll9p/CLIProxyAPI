@@ -311,6 +311,47 @@ func TestEnsureRepositoryKeepsCurrentBranchWhenRemoteDefaultCannotBeResolved(t *
 	assertRepositoryHeadBranch(t, filepath.Join(root, "workspace"), "develop")
 }
 
+func TestCommitAndPushLockedSupportsConsecutivePushes(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+
+	baseDir := filepath.Join(root, "workspace", "auths")
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(baseDir)
+
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+
+	workspaceDir := filepath.Join(root, "workspace")
+	firstAuthPath := filepath.Join(workspaceDir, "auths", "first.json")
+	if err := os.WriteFile(firstAuthPath, []byte(`{"provider":"codex"}`), 0o600); err != nil {
+		t.Fatalf("write first auth: %v", err)
+	}
+	store.mu.Lock()
+	err := store.commitAndPushLocked("Add first auth", filepath.Join("auths", "first.json"))
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("commitAndPushLocked first push: %v", err)
+	}
+
+	secondAuthPath := filepath.Join(workspaceDir, "auths", "second.json")
+	if err := os.WriteFile(secondAuthPath, []byte(`{"provider":"gemini"}`), 0o600); err != nil {
+		t.Fatalf("write second auth: %v", err)
+	}
+	store.mu.Lock()
+	err = store.commitAndPushLocked("Add second auth", filepath.Join("auths", "second.json"))
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("commitAndPushLocked second push: %v", err)
+	}
+
+	assertRemoteFileContents(t, remoteDir, "master", filepath.Join("auths", "first.json"), `{"provider":"codex"}`)
+	assertRemoteFileContents(t, remoteDir, "master", filepath.Join("auths", "second.json"), `{"provider":"gemini"}`)
+}
+
 func setupGitRemoteRepository(t *testing.T, root, defaultBranch string, branches ...testBranchSpec) string {
 	t.Helper()
 
@@ -581,5 +622,38 @@ func assertRemoteBranchContents(t *testing.T, remoteDir, branch, wantContents st
 	}
 	if contents != wantContents {
 		t.Fatalf("remote branch %s contents = %q, want %q", branch, contents, wantContents)
+	}
+}
+
+func assertRemoteFileContents(t *testing.T, remoteDir, branch, filePath, wantContents string) {
+	t.Helper()
+	gitPath := filepath.ToSlash(filePath)
+
+	remoteRepo, err := git.PlainOpen(remoteDir)
+	if err != nil {
+		t.Fatalf("open remote repo: %v", err)
+	}
+	ref, err := remoteRepo.Reference(plumbing.NewBranchReferenceName(branch), false)
+	if err != nil {
+		t.Fatalf("read remote branch %s: %v", branch, err)
+	}
+	commit, err := remoteRepo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("read remote branch %s commit: %v", branch, err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("read remote branch %s tree: %v", branch, err)
+	}
+	file, err := tree.File(gitPath)
+	if err != nil {
+		t.Fatalf("read remote branch %s file %s: %v", branch, gitPath, err)
+	}
+	contents, err := file.Contents()
+	if err != nil {
+		t.Fatalf("read remote branch %s file %s contents: %v", branch, gitPath, err)
+	}
+	if contents != wantContents {
+		t.Fatalf("remote branch %s file %s contents = %q, want %q", branch, gitPath, contents, wantContents)
 	}
 }
