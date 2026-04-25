@@ -258,10 +258,10 @@ func (m *Manager) RefreshSchedulerEntry(authID string) {
 // ReconcileRegistryModelStates aligns per-model runtime state with the current
 // registry snapshot for one auth.
 //
-// Supported models are reset to a clean state because re-registration already
-// cleared the registry-side cooldown/suspension snapshot. ModelStates for
-// models that are no longer present in the registry are pruned entirely so
-// renamed/removed models cannot keep auth-level status stale.
+// Supported models are reset to a clean state once any temporary runtime
+// cooldown has elapsed. ModelStates for models that are no longer present in
+// the registry are pruned entirely so renamed/removed models cannot keep
+// auth-level status stale.
 func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID string) {
 	if m == nil || authID == "" {
 		return
@@ -304,6 +304,9 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 				continue
 			}
 			if modelStateIsClean(state) {
+				continue
+			}
+			if activeModelQuotaCooldown(state, now) {
 				continue
 			}
 			resetModelState(state, now)
@@ -2181,6 +2184,17 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.LastError = nil
 	state.Quota = QuotaState{}
 	state.UpdatedAt = now
+}
+
+func activeModelQuotaCooldown(state *ModelState, now time.Time) bool {
+	if state == nil || !state.Quota.Exceeded {
+		return false
+	}
+	recoverAt := state.NextRetryAfter
+	if state.Quota.NextRecoverAt.After(recoverAt) {
+		recoverAt = state.Quota.NextRecoverAt
+	}
+	return !recoverAt.IsZero() && recoverAt.After(now)
 }
 
 func modelStateIsClean(state *ModelState) bool {
