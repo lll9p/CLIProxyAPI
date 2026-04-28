@@ -1052,6 +1052,17 @@ func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) err
 	return err
 }
 
+func clearAuthCooldownState(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	auth.Unavailable = false
+	auth.NextRetryAfter = time.Time{}
+	auth.Quota = coreauth.QuotaState{}
+	auth.LastError = nil
+	auth.ModelStates = nil
+}
+
 // PatchAuthFileStatus toggles the disabled state of an auth file
 func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	if h.authManager == nil {
@@ -1100,6 +1111,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	// Update disabled state
+	clearAuthCooldownState(targetAuth)
 	targetAuth.Disabled = *req.Disabled
 	if *req.Disabled {
 		targetAuth.Status = coreauth.StatusDisabled
