@@ -15,6 +15,12 @@ type SDKConfig struct {
 	// ResinPlatformName is the Resin platform segment used by Codex reverse proxy routing.
 	ResinPlatformName string `yaml:"resin-platform-name,omitempty" json:"resin-platform-name,omitempty"`
 
+	// DisableImageGeneration disables the built-in image_generation tool when true.
+	// When enabled, the server will avoid injecting image_generation into request payloads,
+	// will remove any existing image_generation tool entries from tools arrays, and will
+	// return 404 for /v1/images/generations and /v1/images/edits.
+	DisableImageGeneration bool `yaml:"disable-image-generation" json:"disable-image-generation"`
+
 	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.
 	// Default is false for safety; when false, /v1internal:* requests are rejected.
 	EnableGeminiCLIEndpoint bool `yaml:"enable-gemini-cli-endpoint" json:"enable-gemini-cli-endpoint"`
