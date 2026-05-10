@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -86,9 +87,11 @@ type apiCallResponse struct {
 //   - data (optional): Raw request body as string (useful for POST/PUT/PATCH).
 //
 // Proxy selection (highest priority first):
-//  1. Selected credential proxy_url
-//  2. Global config proxy-url
-//  3. Direct connect (environment proxies are not used)
+//  1. Codex Resin reverse proxy when configured for the selected credential
+//  2. Selected credential proxy_url
+//  3. Matching per-key proxy-url from config
+//  4. Global config proxy-url
+//  5. Direct connect (environment proxies are not used)
 //
 // Response JSON (returned with HTTP 200 when the APICall itself succeeds):
 //   - status_code: Upstream HTTP status code.
@@ -186,10 +189,11 @@ func (h *Handler) APICall(c *gin.Context) {
 		req.Host = hostOverride
 	}
 
-	httpClient := &http.Client{
-		Timeout: defaultAPICallTimeout,
+	resinApplied := h.applyCodexResinAPICall(req, auth)
+	httpClient := codexauth.NewDirectHTTPClient(defaultAPICallTimeout)
+	if !resinApplied {
+		httpClient.Transport = h.apiCallTransport(auth)
 	}
-	httpClient.Transport = h.apiCallTransport(auth)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -214,6 +218,17 @@ func (h *Handler) APICall(c *gin.Context) {
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func (h *Handler) applyCodexResinAPICall(req *http.Request, auth *coreauth.Auth) bool {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	if !codexauth.ApplyResinReverseProxy(h.cfg, req, auth) {
+		return false
+	}
+	req.Host = ""
+	return true
 }
 
 func firstNonEmptyString(values ...*string) string {

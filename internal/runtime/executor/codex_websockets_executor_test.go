@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -90,6 +92,106 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+}
+
+func TestCodexWebsocketsExecuteUsesResinAndBypassesProxy(t *testing.T) {
+	var proxyCalls int32
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&proxyCalls, 1)
+		http.Error(w, "proxy should not be used", http.StatusBadGateway)
+	}))
+	defer proxyServer.Close()
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	var resinCalls int32
+	resinServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&resinCalls, 1)
+		const wantPath = "/base/codex/https/upstream.example.com/backend-api/codex/responses"
+		if r.URL.Path != wantPath {
+			t.Fatalf("request path = %s, want %s", r.URL.Path, wantPath)
+		}
+		if got := r.Header.Get(codexauth.ResinAccountHeader); got != "codex-account.json" {
+			t.Fatalf("%s = %q, want codex-account.json", codexauth.ResinAccountHeader, got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
+			t.Fatalf("Authorization = %q, want Bearer sk-test", got)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Fatalf("read upstream websocket message: %v", errRead)
+		}
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-2","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Fatalf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer resinServer.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{
+		DisableImageGeneration: config.DisableImageGenerationAll,
+		ProxyURL:               proxyServer.URL,
+		ResinURL:               resinServer.URL + "/base",
+		ResinPlatformName:      "codex",
+	}})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-id",
+		Provider: "codex",
+		FileName: "codex-account.json",
+		ProxyURL: proxyServer.URL,
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": "https://upstream.example.com/backend-api/codex",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":"Say ok"}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	if _, err := exec.Execute(context.Background(), auth, req, opts); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := atomic.LoadInt32(&resinCalls); got != 1 {
+		t.Fatalf("resin calls = %d, want 1", got)
+	}
+	if got := atomic.LoadInt32(&proxyCalls); got != 0 {
+		t.Fatalf("proxy calls = %d, want 0", got)
+	}
+}
+
+func TestCodexWebsocketRouteAddsResinHeader(t *testing.T) {
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{ResinURL: "https://resin.example.com/root", ResinPlatformName: "codex"}})
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer token")
+	auth := &cliproxyauth.Auth{ID: "auth-id", FileName: "codex-account.json"}
+
+	gotURL, gotHeaders, ok := exec.codexWebsocketRoute("wss://chatgpt.com/backend-api/codex/responses?stream=1", headers, auth)
+	if !ok {
+		t.Fatal("expected Resin websocket route")
+	}
+	const wantURL = "ws://resin.example.com/root/codex/https/chatgpt.com/backend-api/codex/responses?stream=1"
+	if gotURL != wantURL {
+		t.Fatalf("websocket URL = %q, want %q", gotURL, wantURL)
+	}
+	if got := gotHeaders.Get(codexauth.ResinAccountHeader); got != "codex-account.json" {
+		t.Fatalf("%s = %q, want codex-account.json", codexauth.ResinAccountHeader, got)
+	}
+	if got := gotHeaders.Get("Authorization"); got != "Bearer token" {
+		t.Fatalf("Authorization = %q, want Bearer token", got)
+	}
+}
+
+func TestNewDirectWebsocketDialerDisablesProxy(t *testing.T) {
+	dialer := newDirectWebsocketDialer()
+	if dialer.Proxy != nil {
+		t.Fatal("expected direct websocket dialer to disable proxy function")
 	}
 }
 

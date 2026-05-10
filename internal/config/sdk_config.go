@@ -9,6 +9,12 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ResinURL is the base URL of the Resin reverse proxy for Codex account traffic.
+	ResinURL string `yaml:"resin-url" json:"resin-url"`
+
+	// ResinPlatformName identifies this service to Resin for sticky account routing.
+	ResinPlatformName string `yaml:"resin-platform-name" json:"resin-platform-name"`
+
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
 	// Supported values:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -76,5 +77,61 @@ func TestNewCodexAuthWithProxyURL_OverrideProxyTakesPrecedence(t *testing.T) {
 	}
 	if proxyURL == nil || proxyURL.String() != "http://override.example.com:8081" {
 		t.Fatalf("proxy URL = %v, want http://override.example.com:8081", proxyURL)
+	}
+}
+
+func TestRefreshTokensUsesResinRouteAndStableAccount(t *testing.T) {
+	var proxyCalls int32
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&proxyCalls, 1)
+		http.Error(w, "proxy should not be used", http.StatusBadGateway)
+	}))
+	defer proxyServer.Close()
+
+	var resinHost string
+	resinServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		const wantPath = "/resin/codex/https/auth.openai.com/oauth/token"
+		if r.URL.Path != wantPath {
+			t.Fatalf("path = %q, want %q", r.URL.Path, wantPath)
+		}
+		if r.Host != resinHost {
+			t.Fatalf("Host = %q, want Resin host %q", r.Host, resinHost)
+		}
+		if got := r.Header.Get(ResinAccountHeader); got != "codex-account.json" {
+			t.Fatalf("%s = %q, want codex-account.json", ResinAccountHeader, got)
+		}
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		bodyStr := string(body)
+		if !strings.Contains(bodyStr, "grant_type=refresh_token") || !strings.Contains(bodyStr, "refresh_token=refresh-1") {
+			t.Fatalf("refresh form body = %q", bodyStr)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"access-2","refresh_token":"refresh-2","expires_in":3600}`))
+	}))
+	defer resinServer.Close()
+	resinHost = strings.TrimPrefix(resinServer.URL, "http://")
+
+	cfg := &config.Config{SDKConfig: config.SDKConfig{
+		ProxyURL:          proxyServer.URL,
+		ResinURL:          resinServer.URL + "/resin",
+		ResinPlatformName: "codex",
+	}}
+	auth := NewCodexAuthWithProxyURLForAccount(cfg, proxyServer.URL, "codex-account.json")
+
+	tokenData, err := auth.RefreshTokens(context.Background(), "refresh-1")
+	if err != nil {
+		t.Fatalf("RefreshTokens error: %v", err)
+	}
+	if tokenData.AccessToken != "access-2" || tokenData.RefreshToken != "refresh-2" {
+		t.Fatalf("token data = %#v", tokenData)
+	}
+	if got := atomic.LoadInt32(&proxyCalls); got != 0 {
+		t.Fatalf("proxy calls = %d, want 0", got)
 	}
 }
