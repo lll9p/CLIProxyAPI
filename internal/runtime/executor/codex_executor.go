@@ -271,7 +271,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -438,7 +438,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -543,7 +543,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -938,6 +938,9 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	if err != nil {
 		return nil, nil, codexIdentityConfuseState{}, err
 	}
+	if cache.ID != "" {
+		httpReq.Header.Set("Session_id", cache.ID)
+	}
 	return httpReq, rawJSON, identityState, nil
 }
 
@@ -971,7 +974,6 @@ func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityC
 	if headers == nil {
 		return
 	}
-	defer deleteDeprecatedCodexConversationHeader(headers)
 	if state == nil || !state.enabled {
 		return
 	}
@@ -984,6 +986,12 @@ func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityC
 	}
 
 	setHeaderCasePreserved(headers, "Session-Id", state.promptCacheKey)
+	if headerValueCaseInsensitive(headers, "session_id") != "" {
+		setHeaderCasePreserved(headers, "session_id", state.promptCacheKey)
+	}
+	if headerValueCaseInsensitive(headers, "Conversation_id") != "" {
+		setHeaderCasePreserved(headers, "Conversation_id", state.promptCacheKey)
+	}
 	headers.Set("X-Client-Request-Id", state.promptCacheKey)
 	headers.Set("Thread-Id", state.promptCacheKey)
 	headers.Set("X-Codex-Window-Id", state.promptCacheKey+":0")
@@ -1079,6 +1087,10 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 
+	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
+		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
+	}
+
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
 	} else {
@@ -1097,19 +1109,18 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	} else if !isAPIKey {
 		r.Header.Set("Originator", codexOriginator)
 	}
-	// if !isAPIKey {
-	// 	if auth != nil && auth.Metadata != nil {
-	// 		if accountID, ok := auth.Metadata["account_id"].(string); ok {
-	// 			r.Header.Set("Chatgpt-Account-Id", accountID)
-	// 		}
-	// 	}
-	// }
+	if !isAPIKey {
+		if auth != nil && auth.Metadata != nil {
+			if accountID, ok := auth.Metadata["account_id"].(string); ok {
+				r.Header.Set("Chatgpt-Account-Id", accountID)
+			}
+		}
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
-	deleteDeprecatedCodexConversationHeader(r.Header)
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
