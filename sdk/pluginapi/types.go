@@ -97,7 +97,7 @@ type Capabilities struct {
 	ResponseBeforeTranslator ResponseNormalizer
 	// ResponseAfterTranslator normalizes translated responses before delivery.
 	ResponseAfterTranslator ResponseNormalizer
-	// RequestInterceptor rewrites execution requests before they reach the upstream executor.
+	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
 	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
@@ -109,7 +109,7 @@ type Capabilities struct {
 	UsagePlugin UsagePlugin
 	// CommandLinePlugin declares and handles plugin-owned command-line flags.
 	CommandLinePlugin CommandLinePlugin
-	// ManagementAPI declares plugin-owned diagnostic Management API routes.
+	// ManagementAPI declares plugin-owned diagnostic Management API and resource routes.
 	ManagementAPI ManagementAPI
 }
 
@@ -680,9 +680,10 @@ type ResponseNormalizer interface {
 	NormalizeResponse(context.Context, ResponseTransformRequest) (PayloadResponse, error)
 }
 
-// RequestInterceptor rewrites execution requests before they reach the upstream executor.
+// RequestInterceptor rewrites execution requests before and after credential selection.
 type RequestInterceptor interface {
-	InterceptRequest(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
+	InterceptRequestBeforeAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
+	InterceptRequestAfterAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
 }
 
 // ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
@@ -732,13 +733,22 @@ type ResponseTransformRequest struct {
 
 // RequestInterceptRequest describes a request about to be executed upstream.
 type RequestInterceptRequest struct {
-	SourceFormat   string
-	Model          string
+	// SourceFormat is the original client protocol format.
+	SourceFormat string
+	// ToFormat is the selected upstream protocol format. It is empty before credential selection.
+	ToFormat string
+	// Model is the current execution model. After credential selection this is the selected upstream model.
+	Model string
+	// RequestedModel is the client-requested model before alias/model-pool rewriting.
 	RequestedModel string
-	Stream         bool
-	Headers        http.Header
-	Body           []byte
-	Metadata       map[string]any
+	// Stream reports whether the request expects streaming output.
+	Stream bool
+	// Headers contains the current upstream request headers.
+	Headers http.Header
+	// Body contains the current request payload.
+	Body []byte
+	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
+	Metadata map[string]any
 }
 
 // RequestInterceptResponse returns request modifications.
@@ -921,7 +931,7 @@ type CommandLineExecutionResponse struct {
 	ExitCode int
 }
 
-// ManagementAPI declares plugin-owned Management API routes.
+// ManagementAPI declares plugin-owned Management API and resource routes.
 type ManagementAPI interface {
 	RegisterManagement(context.Context, ManagementRegistrationRequest) (ManagementRegistrationResponse, error)
 }
@@ -932,12 +942,16 @@ type ManagementRegistrationRequest struct {
 	Plugin Metadata
 	// BasePath is the only Management API prefix plugins may register under.
 	BasePath string
+	// ResourceBasePath is the plugin resource prefix for browser-navigable resources.
+	ResourceBasePath string
 }
 
-// ManagementRegistrationResponse lists plugin-owned Management API routes.
+// ManagementRegistrationResponse lists plugin-owned Management API and resource routes.
 type ManagementRegistrationResponse struct {
 	// Routes contains the exact Management API routes to expose.
 	Routes []ManagementRoute
+	// Resources contains browser-navigable plugin resources exposed under /v0/resource/plugins/<pluginID>/.
+	Resources []ResourceRoute
 }
 
 // ManagementRoute describes one plugin-owned Management API route.
@@ -946,15 +960,27 @@ type ManagementRoute struct {
 	Method string
 	// Path is an exact path under /v0/management/. Relative paths are resolved under that prefix.
 	Path string
-	// Menu is the optional management UI menu label for GET routes.
+	// Menu is a legacy resource menu label. GET routes with Menu are registered under /v0/resource/plugins/<pluginID>/.
 	Menu string
-	// Description explains the management route for UI display.
+	// Description explains the legacy resource menu entry for UI display.
 	Description string
 	// Handler processes matching Management API requests.
 	Handler ManagementHandler
 }
 
-// ManagementHandler handles one plugin-owned Management API route.
+// ResourceRoute describes one plugin-owned browser-navigable resource route.
+type ResourceRoute struct {
+	// Path is an exact path under /v0/resource/plugins/<pluginID>/. Relative paths are resolved under that prefix.
+	Path string
+	// Menu is the management UI menu label for this GET resource.
+	Menu string
+	// Description explains the resource route for UI display.
+	Description string
+	// Handler processes matching resource requests. Resource requests are not management-authenticated.
+	Handler ManagementHandler
+}
+
+// ManagementHandler handles one plugin-owned Management API or resource route.
 type ManagementHandler interface {
 	HandleManagement(context.Context, ManagementRequest) (ManagementResponse, error)
 }
