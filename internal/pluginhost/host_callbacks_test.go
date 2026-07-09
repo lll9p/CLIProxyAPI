@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -68,6 +70,44 @@ func TestHostHTTPDoCallbackUsesHostHTTPClient(t *testing.T) {
 	}
 	if resp.Headers.Get("X-Test") != "ok" {
 		t.Fatalf("X-Test = %q, want ok", resp.Headers.Get("X-Test"))
+	}
+}
+
+func TestHostHTTPClientBypassesResin(t *testing.T) {
+	var resinHits atomic.Int32
+	resinServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resinHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer resinServer.Close()
+
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("upstream"))
+	}))
+	defer upstreamServer.Close()
+
+	host := New()
+	host.mu.Lock()
+	host.runtimeConfig = &config.Config{SDKConfig: config.SDKConfig{
+		ResinURL:          resinServer.URL + "/secret",
+		ResinPlatformName: "cpa",
+	}}
+	host.mu.Unlock()
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		FileName: "codex-user.json",
+		Metadata: map[string]any{"access_token": "token"},
+	}
+
+	resp, err := host.newHTTPClient(auth).Do(context.Background(), pluginapi.HTTPRequest{URL: upstreamServer.URL})
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	if got := string(resp.Body); got != "upstream" {
+		t.Fatalf("response body = %q, want upstream", got)
+	}
+	if got := resinHits.Load(); got != 0 {
+		t.Fatalf("Resin hits = %d, want 0", got)
 	}
 }
 
