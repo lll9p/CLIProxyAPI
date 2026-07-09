@@ -93,9 +93,10 @@ func (k *KimiAuth) CreateTokenStorage(bundle *KimiAuthBundle) *KimiTokenStorage 
 
 // DeviceFlowClient handles the OAuth2 device flow for Kimi.
 type DeviceFlowClient struct {
-	httpClient *http.Client
-	cfg        *config.Config
-	deviceID   string
+	httpClient      *http.Client
+	cfg             *config.Config
+	deviceID        string
+	refreshRouteKey string
 }
 
 // NewDeviceFlowClient creates a new device flow client.
@@ -131,6 +132,29 @@ func NewDeviceFlowClientWithDeviceIDAndProxyURL(cfg *config.Config, deviceID str
 		httpClient: client,
 		cfg:        cfg,
 		deviceID:   resolvedDeviceID,
+	}
+}
+
+// NewDeviceFlowClientWithDeviceIDAndHTTPClient creates a device flow client with the provided HTTP client.
+func NewDeviceFlowClientWithDeviceIDAndHTTPClient(deviceID string, httpClient *http.Client, refreshRouteKey ...string) *DeviceFlowClient {
+	var routeKey string
+	if len(refreshRouteKey) > 0 {
+		routeKey = strings.TrimSpace(refreshRouteKey[0])
+	}
+	if httpClient == nil {
+		client := NewDeviceFlowClientWithDeviceID(nil, deviceID)
+		client.refreshRouteKey = routeKey
+		return client
+	}
+
+	resolvedDeviceID := strings.TrimSpace(deviceID)
+	if resolvedDeviceID == "" {
+		resolvedDeviceID = getOrCreateDeviceID()
+	}
+	return &DeviceFlowClient{
+		httpClient:      httpClient,
+		deviceID:        resolvedDeviceID,
+		refreshRouteKey: routeKey,
 	}
 }
 
@@ -352,7 +376,11 @@ func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string
 	}
 	refreshToken = strings.TrimSpace(refreshToken)
 
-	result, err, _ := kimiRefreshGroup.Do(refreshToken, func() (interface{}, error) {
+	refreshKey := refreshToken + "\x00" + c.deviceID
+	if c.refreshRouteKey != "" {
+		refreshKey += "\x00" + c.refreshRouteKey
+	}
+	result, err, _ := kimiRefreshGroup.Do(refreshKey, func() (interface{}, error) {
 		return c.refreshTokenSingleFlight(context.WithoutCancel(ctx), refreshToken)
 	})
 	if err != nil {

@@ -29,6 +29,30 @@ func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 	}
 }
 
+func TestAPICallTransportIgnoresResinConfig(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{cfg: &config.Config{SDKConfig: sdkconfig.SDKConfig{
+		ResinURL:          "http://resin:2260/secret",
+		ResinPlatformName: "cpa",
+	}}}
+	auth := &coreauth.Auth{
+		Provider: "codex",
+		FileName: "codex-user.json",
+		ProxyURL: "direct",
+		Metadata: map[string]any{"access_token": "token"},
+	}
+
+	transport := h.apiCallTransport(auth)
+	httpTransport, ok := transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want raw *http.Transport", transport)
+	}
+	if httpTransport.Proxy != nil {
+		t.Fatal("expected management api-call direct transport to ignore Resin")
+	}
+}
+
 func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
 	t.Parallel()
 

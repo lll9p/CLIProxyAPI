@@ -19,7 +19,8 @@ import (
 
 // XAIAuth performs xAI OAuth discovery, token exchange, and refresh.
 type XAIAuth struct {
-	httpClient *http.Client
+	httpClient      *http.Client
+	refreshRouteKey string
 }
 
 var xaiRefreshGroup singleflight.Group
@@ -41,6 +42,20 @@ func NewXAIAuthWithProxyURL(cfg *config.Config, proxyURL string) *XAIAuth {
 	}
 	sdkCfg.ProxyURL = effectiveProxyURL
 	return &XAIAuth{httpClient: util.SetProxy(&sdkCfg, &http.Client{})}
+}
+
+// NewXAIAuthWithHTTPClient creates an xAI OAuth helper with the provided HTTP client.
+func NewXAIAuthWithHTTPClient(httpClient *http.Client, refreshRouteKey ...string) *XAIAuth {
+	var routeKey string
+	if len(refreshRouteKey) > 0 {
+		routeKey = strings.TrimSpace(refreshRouteKey[0])
+	}
+	if httpClient == nil {
+		auth := NewXAIAuth(nil)
+		auth.refreshRouteKey = routeKey
+		return auth
+	}
+	return &XAIAuth{httpClient: httpClient, refreshRouteKey: routeKey}
 }
 
 // ValidateOAuthEndpoint validates an endpoint returned by xAI discovery.
@@ -196,7 +211,11 @@ func (a *XAIAuth) RefreshTokens(ctx context.Context, refreshToken, tokenEndpoint
 	}
 	tokenEndpoint = strings.TrimSpace(tokenEndpoint)
 
-	result, err, _ := xaiRefreshGroup.Do(refreshToken, func() (interface{}, error) {
+	refreshKey := refreshToken + "\x00" + tokenEndpoint
+	if a.refreshRouteKey != "" {
+		refreshKey += "\x00" + a.refreshRouteKey
+	}
+	result, err, _ := xaiRefreshGroup.Do(refreshKey, func() (interface{}, error) {
 		return a.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken, tokenEndpoint)
 	})
 	if err != nil {
