@@ -819,42 +819,18 @@ Unsupported provider 至少覆盖：
 15. 补 helper、negative、WebSocket reuse、辅助入口和 management exclusion 测试。
 16. 运行格式化、测试和 build。
 
-## 上游同步与长期维护
+## main 同步与长期维护
 
-上游更新频繁时，必须把分支职责固定下来：
+更新频繁时，必须把分支职责固定下来：
 
-- `upstream/main`：官方仓库 `router-for-me/CLIProxyAPI` 的主分支，只读参考。
-- 本地 `main`：`upstream/main` 的干净镜像，不放 Resin 私有提交。
+- 本地 `main`：由维护者手动同步外部更新，不放 Resin 私有提交。
 - 本地 `develop`：在 `main` 之上保留 Resin 实现和其他本地开发提交。
-- `origin/main`、`origin/develop`：个人 fork 上对应的远端分支；只在本地验证完成后推送。
-- `sync/upstream-*`：一次同步使用的临时集成分支，用于解决冲突和运行测试，避免直接污染 `develop`。
+- `origin/main`、`origin/develop`：个人远端上的对应分支；只在本地验证完成后推送。
+- `sync/main-*`：一次同步使用的临时集成分支，用于解决冲突和运行测试，避免直接污染 `develop`。
 
-本章假设 Resin 实现已经提交在 `develop`。工作区存在未提交或未跟踪的实现文件时，不得开始上游同步。尤其不能让 `resin.md`、`internal/resin/` 或新增测试以未跟踪状态跨分支移动。
+本流程不配置或使用额外的源码 remote。开始集成前，由维护者负责完成本地 `main` 的手动同步并确认目标 commit 正确；后续流程只在本地 `main` 与 `develop` 之间工作。
 
-### 一次性配置 upstream remote
-
-当前个人 fork 使用 `origin`。首次同步前检查 remote：
-
-```bash
-git remote -v
-git remote get-url upstream
-```
-
-如果 `upstream` 尚不存在，添加官方仓库：
-
-```bash
-git remote add upstream git@github.com:router-for-me/CLIProxyAPI.git
-git fetch --prune upstream
-git remote -v
-```
-
-也可以使用 HTTPS URL：
-
-```bash
-git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
-```
-
-如果已经存在 `upstream`，先核对 URL，不要重复添加或未经确认直接改写。预期关系是 `origin` 指向个人 fork，`upstream` 指向官方仓库。
+本章假设 Resin 实现已经提交在 `develop`。工作区存在未提交或未跟踪的实现文件时，不得开始同步。尤其不能让 `resin.md`、`internal/resin/` 或新增测试以未跟踪状态跨分支移动。
 
 ### 每次同步前的硬性检查
 
@@ -882,30 +858,20 @@ git log --oneline --decorate --graph --max-count=30 --all
 git log --oneline --left-right main...develop
 ```
 
-### 只用 fast-forward 更新本地 main
+### 确认本地 main 已手动同步
 
-先抓取官方更新，再让本地 `main` fast-forward 到 `upstream/main`：
+维护者完成手动同步后，先确认本地 `main` 工作区干净并记录目标 commit：
 
 ```bash
-git fetch --prune upstream
 git switch main
 git status --short --branch
-git merge --ff-only upstream/main
+git rev-parse main
+git log --oneline --decorate -10
 ```
 
-禁止在 `main` 上使用普通 merge 制造本地合并提交，也不要把 Resin 提交 cherry-pick 到 `main`。`main` 的唯一职责是镜像官方历史。
+禁止把 Resin 私有提交带入 `main`。如果 `main` 的目标 commit、历史来源或工作区状态不明确，应停止同步并由维护者先完成确认；不要用 `git reset --hard`、强制 checkout 或 force push 掩盖问题。
 
-如果 `git merge --ff-only upstream/main` 失败，说明本地 `main` 含有官方历史之外的提交或已经发生分叉。此时停止同步并检查：
-
-```bash
-git log --oneline --left-right --cherry-pick main...upstream/main
-git merge-base --is-ancestor main upstream/main
-git status --short --branch
-```
-
-不要用 `git reset --hard`、强制 checkout 或 force push 掩盖分叉。先确认本地额外提交是否应迁移到 `develop` 或独立分支，再恢复 `main` 的镜像职责。
-
-本地 `main` 更新成功后，可以选择同步个人 fork：
+本地 `main` 确认无误后，可以选择同步个人远端：
 
 ```bash
 git push origin main
@@ -915,23 +881,23 @@ git push origin main
 
 ### 先记录更新后 main 的测试基线
 
-每次合并前，应在更新后的纯上游 `main` 上运行基线验证。这样可以区分“上游本来就失败”和“Resin 合并引入回归”：
+每次合并前，应在手动同步后的本地 `main` 上运行基线验证。这样可以区分“`main` 本来就失败”和“Resin 合并引入回归”：
 
 ```bash
 HTTP_PROXY=http://127.0.0.1:1081 HTTPS_PROXY=http://127.0.0.1:1081 ALL_PROXY=http://127.0.0.1:1081 NO_PROXY=localhost,127.0.0.1,::1 go test ./...
 HTTP_PROXY=http://127.0.0.1:1081 HTTPS_PROXY=http://127.0.0.1:1081 ALL_PROXY=http://127.0.0.1:1081 NO_PROXY=localhost,127.0.0.1,::1 go build -o test-output ./cmd/server && rm -f test-output
 ```
 
-不要在纯上游 `main` 上运行会改写工作树的批量格式化或代码生成命令。基线阶段只验证官方 commit，不制造本地差异。
+不要在 `main` 上运行会改写工作树的批量格式化或代码生成命令。基线阶段只验证已确认的 `main` commit，不制造本地差异。
 
 记录以下信息：
 
-- `git rev-parse main` 的官方 commit。
+- `git rev-parse main` 的 commit。
 - `go test ./...` 的通过、跳过和失败数量。
 - 每个失败的测试名称和错误位置。
 - server build 是否成功。
 
-不能永久沿用本文当前记录的既有失败。上游可能修复、删除或改变该测试；每次同步都以更新后的 `main` 实测结果为准。
+不能永久沿用本文当前记录的既有失败。`main` 可能修复、删除或改变该测试；每次同步都以更新后的 `main` 实测结果为准。
 
 ### 使用临时集成分支合并
 
@@ -939,12 +905,12 @@ HTTP_PROXY=http://127.0.0.1:1081 HTTPS_PROXY=http://127.0.0.1:1081 ALL_PROXY=htt
 
 ```bash
 git switch develop
-sync_branch="sync/upstream-$(date +%Y%m%d-%H%M%S)"
+sync_branch="sync/main-$(date +%Y%m%d-%H%M%S)"
 git switch -c "$sync_branch"
 git merge --no-commit --no-ff main
 ```
 
-`--no-commit` 让 merge 在提交前停下，便于审计、格式化和测试；`--no-ff` 保留明确的上游同步边界。此时 `develop` 仍指向同步前的安全提交。
+`--no-commit` 让 merge 在提交前停下，便于审计、格式化和测试；`--no-ff` 保留明确的 `main` 同步边界。此时 `develop` 仍指向同步前的安全提交。
 
 如果输出为 `Already up to date`，不需要创建 merge commit。确认后返回 `develop` 并删除空的临时分支即可。
 
@@ -967,24 +933,24 @@ git switch develop
 
 ### Resin 冲突解决原则
 
-冲突解决的目标不是机械保留旧代码，而是把 Resin 能力重新接到上游最新、正确的出口位置。必须先理解上游变更，再做最小适配。
+冲突解决的目标不是机械保留旧代码，而是把 Resin 能力重新接到 `main` 最新、正确的出口位置。必须先理解 `main` 变更，再做最小适配。
 
 通用原则：
 
 - 不要对关键冲突文件整体使用 `ours` 或 `theirs`。
-- 优先保留上游新增的错误处理、认证字段、请求头、重试、流式处理和连接生命周期语义。
+- 优先保留 `main` 新增的错误处理、认证字段、请求头、重试、流式处理和连接生命周期语义。
 - Resin 逻辑继续集中在 `internal/resin`，不要因为冲突在 executor、SDK 或 command 中复制 route 构造代码。
-- 上游删除或替换旧 helper 时，把 Resin 包装迁移到新的 canonical 出口，不要保留已经失效的旧 helper 形成双路径。
+- `main` 删除或替换旧 helper 时，把 Resin 包装迁移到新的 canonical 出口，不要保留已经失效的旧 helper 形成双路径。
 - 所有请求必须重新判断是 wrapped runtime 流量还是明确的 raw 旁路，不能仅以“原文件以前怎么处理”为依据。
-- 不增加与上游架构无关的兼容层；只有真实持久化数据、已发布 API 或明确外部调用方需要时才保留兼容代码。
+- 不增加与 `main` 架构无关的兼容层；只有真实持久化数据、已发布 API 或明确外部调用方需要时才保留兼容代码。
 
 高冲突文件和必须保持的语义：
 
-- `internal/config/sdk_config.go`、`config.example.yaml`：保留 `resin-url`、`resin-platform-name`，同时吸收上游新增配置字段和注释顺序。
+- `internal/config/sdk_config.go`、`config.example.yaml`：保留 `resin-url`、`resin-platform-name`，同时吸收 `main` 新增配置字段和注释顺序。
 - `internal/resin/`：继续作为唯一 V1 route 实现；保持 escaped path、API-key 排除、stable account、direct transport、response restoration 和 WS header clone 语义。
 - `internal/runtime/executor/helps/proxy_helpers.go`：raw helper 保持原 proxy/context/default 优先级，wrapped helper只在最外层调用 `resin.WrapTransport`。
-- `internal/runtime/executor/helps/utls_client.go`：先完整保留上游最新 uTLS/protected-host fallback，再在最外层包 Resin。
-- `internal/pluginhost/http_bridge.go`：继续使用 raw helper，不能因上游统一 client factory 而意外进入 Resin。
+- `internal/runtime/executor/helps/utls_client.go`：先完整保留 `main` 最新 uTLS/protected-host fallback，再在最外层包 Resin。
+- `internal/pluginhost/http_bridge.go`：继续使用 raw helper，不能因 `main` 统一 client factory 而意外进入 Resin。
 - 各 executor 的 `HttpRequest`：继续 raw；正常 runtime、token mint、grounding、credits、project 等账号流量继续 wrapped。
 - `internal/runtime/executor/antigravity_executor.go`：保持 raw HTTP/1.1 client 与 wrapped client 分层，不能重新把 project discovery 放回文件枚举阶段。
 - `sdk/auth/filestore.go`：`List/readAuthFiles` 必须保持纯读取，不允许恢复 Antigravity 隐式联网和回写。
@@ -993,7 +959,7 @@ git switch develop
 - `cmd/fetch_codex_models`、`cmd/fetch_antigravity_models`、`sdk/cliproxy/antigravity_models.go`：继续显式包装 Resin，同时保留各入口原 proxy 优先级和 credential timeout。
 - Management `api-call`、plugin bridge、SDK generic `HttpRequest`：继续 raw，不得因为调用了新公共 helper而自动路由到 Resin。
 
-如果上游新增 provider，不要直接加入 Resin allowlist。只有同时满足以下条件才考虑加入：
+如果 `main` 新增 provider，不要直接加入 Resin allowlist。只有同时满足以下条件才考虑加入：
 
 - provider 是内置账号型 runtime，而不是 API-key 或任意兼容 BaseURL。
 - auth 有稳定的 persisted `FileName` 或 `ID`。
@@ -1026,7 +992,7 @@ git grep -n "FetchAntigravityProjectID" -- sdk/auth internal/runtime cmd sdk/cli
 - route 构造没有散落到 `internal/resin` 之外。
 - wrapped helper 没有递归包装或重复包装。
 - raw 旁路没有调用 wrapped helper。
-- 新上游 HTTP/WS 出口没有绕开既有 Resin policy。
+- `main` 新增的 HTTP/WS 出口没有绕开既有 Resin policy。
 - `FileTokenStore.List` 没有恢复网络副作用。
 - 没有修改 `internal/translator/` 来承载 Resin。
 - 没有新增日志输出 Resin account、Authorization、Cookie、dialKey 或物理 Resin URL。
@@ -1055,12 +1021,12 @@ git diff --check
 结果判断规则：
 
 - 更新后的 `main` 通过、集成分支失败：视为 Resin 合并回归，必须修复后才能完成 merge。
-- `main` 和集成分支在同一测试以相同原因失败：记录为上游基线问题，但仍检查 Resin 是否扩大影响。
+- `main` 和集成分支在同一测试以相同原因失败：记录为 `main` 基线问题，但仍检查 Resin 是否扩大影响。
 - `main` 原有失败在集成分支消失：确认不是测试被误删、跳过或条件被改变。
-- 测试数量明显减少：检查上游是否移动 package、删除测试，或 merge 是否意外丢失 Resin 测试。
+- 测试数量明显减少：检查 `main` 是否移动 package、删除测试，或 merge 是否意外丢失 Resin 测试。
 - build 失败或 `git diff --check` 失败：不得提交 merge。
 
-如果上游改动涉及 HTTP transport、OAuth、WebSocket、auth store 或 provider 注册，还应执行真实环境 smoke test：
+如果 `main` 改动涉及 HTTP transport、OAuth、WebSocket、auth store 或 provider 注册，还应执行真实环境 smoke test：
 
 - eligible persisted OAuth auth 的 HTTP runtime 请求命中 Resin V1 path，并携带预期 account。
 - Codex/xAI WebSocket 连接命中 `ws://resin...`，配置或账号变化后会重拨。
@@ -1082,10 +1048,10 @@ git diff --cached
 git diff --check
 git diff --cached --check
 git diff --cached --stat
-git commit -m "merge: sync upstream main into develop"
+git commit -m "merge: sync main into develop"
 ```
 
-只对明确解决、格式化或适配过的文件执行 `git add`。merge 自动暂存的上游文件仍需通过 `git diff --cached` 审查。提交前必须确认没有把 auth 文件、token、`.env`、构建产物、日志或 `.trellis/` 加入索引。
+只对明确解决、格式化或适配过的文件执行 `git add`。merge 自动暂存的 `main` 文件仍需通过 `git diff --cached` 审查。提交前必须确认没有把 auth 文件、token、`.env`、构建产物、日志或 `.trellis/` 加入索引。
 
 然后让 `develop` fast-forward 到已验证的集成结果：
 
@@ -1097,7 +1063,7 @@ git status --short --branch
 git show --no-patch --pretty=%P HEAD
 ```
 
-最后按需推送个人 fork：
+最后按需推送个人远端：
 
 ```bash
 git push origin develop
@@ -1124,38 +1090,38 @@ merge commit 创建后但尚未 fast-forward `develop`：
 
 - 优先在 `develop` 上做最小 fix-forward，不改写已共享历史。
 - 确实必须撤销整个 merge 时，使用新的 revert commit，并明确记录 mainline parent；不要 force push。
-- revert merge 会影响 Git 对后续相同上游提交的合并判断，下一次同步前必须先评估是否需要 revert 该 revert。
+- revert merge 会影响 Git 对后续相同 `main` 提交的合并判断，下一次同步前必须先评估是否需要 revert 该 revert。
 
 ### 每次同步完成后的记录
 
 至少在 merge commit、PR 描述或维护日志中记录：
 
-- 合入的 `upstream/main` commit SHA。
+- 合入的 `main` commit SHA。
 - 是否发生冲突以及冲突文件。
-- Resin 接入点是否因上游架构变化而迁移。
+- Resin 接入点是否因 `main` 架构变化而迁移。
 - 更新后 `main` 的测试基线。
 - 集成分支的定向测试、全仓测试和 build 结果。
-- 仍存在的上游失败及其文件/行号。
+- 仍存在的 `main` 基线失败及其文件/行号。
 - 是否完成真实 Resin smoke test。
 
-`resin.md` 的最终检查表应反映当前 `develop` 的真实状态。上游改变测试数量、修复既有失败或引入新出口后，应更新对应条目，不能长期保留过期数字和结论。
+`resin.md` 的最终检查表应反映当前 `develop` 的真实状态。`main` 改变测试数量、修复既有失败或引入新出口后，应更新对应条目，不能长期保留过期数字和结论。
 
 ### 每次同步速查表
 
 - [ ] `develop` 工作区干净，Resin 实现和文档均已提交。
-- [ ] `upstream` 指向官方仓库，`origin` 指向个人 fork。
-- [ ] 本地 `main` 已通过 `git merge --ff-only upstream/main` 更新，没有本地私有提交。
+- [ ] 只配置所需的个人远端，不依赖额外源码 remote。
+- [ ] 本地 `main` 已由维护者手动同步并确认目标 commit，没有 Resin 私有提交。
 - [ ] 已记录更新后 `main` 的 commit、全仓测试和 build 基线。
-- [ ] 已从 `develop` 创建独立 `sync/upstream-*` 临时集成分支。
+- [ ] 已从 `develop` 创建独立 `sync/main-*` 临时集成分支。
 - [ ] 使用 `git merge --no-commit --no-ff main`，未直接污染 `develop`。
-- [ ] 所有冲突都按上游最新架构重新判断 wrapped/raw 边界，没有整体选用 `ours`/`theirs`。
+- [ ] 所有冲突都按 `main` 最新架构重新判断 wrapped/raw 边界，没有整体选用 `ours`/`theirs`。
 - [ ] `internal/resin` 仍是唯一 route implementation，HTTP/WS/refresh/project discovery 接入点完整。
 - [ ] API-key、compatibility、management、plugin 和 generic `HttpRequest` 旁路仍然 raw。
 - [ ] `FileTokenStore.List` 仍无网络副作用。
 - [ ] Resin 定向测试、四个 auth refresh 测试、executor/WS 测试和辅助入口测试通过。
 - [ ] 已对比集成结果与同一 `main` commit 的全仓测试基线。
 - [ ] server build 和 `git diff --check` 通过。
-- [ ] 高风险上游改动已执行真实 Resin smoke test。
+- [ ] `main` 高风险改动已执行真实 Resin smoke test。
 - [ ] merge commit 只包含审查过的文件，不包含 secret、运行数据、构建产物或 `.trellis/`。
 - [ ] `develop` 只通过 `git merge --ff-only "$sync_branch"` 接收已验证结果。
 - [ ] 推送未使用 force，merge commit 的两个 parent 正确。
