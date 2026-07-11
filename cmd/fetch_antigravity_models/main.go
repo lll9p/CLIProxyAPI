@@ -155,11 +155,10 @@ func main() {
 	// Fetch models from the upstream Antigravity API.
 	fmt.Println("Fetching Antigravity model list from upstream...")
 
-	models, err := fetchModels(ctx, cfg, fileStore, chosen)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to fetch antigravity models: %v\n", err)
-		os.Exit(1)
-	}
+	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	models := fetchModels(fetchCtx, cfg, chosen)
 	if len(models) == 0 {
 		fmt.Fprintln(os.Stderr, "warning: no models returned (API may be unavailable or token expired)")
 	} else {
@@ -191,40 +190,12 @@ func main() {
 	fmt.Printf("Model list saved to: %s\n", outputPath)
 }
 
-func fetchModels(ctx context.Context, cfg *config.Config, store *sdkauth.FileTokenStore, auth *coreauth.Auth) ([]modelEntry, error) {
-	if auth == nil {
-		return nil, fmt.Errorf("auth is nil")
-	}
+func fetchModels(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) []modelEntry {
 	accessToken := metaStringValue(auth.Metadata, "access_token")
 	if accessToken == "" {
-		return nil, fmt.Errorf("no access token found in auth")
+		fmt.Fprintln(os.Stderr, "error: no access token found in auth")
+		return nil
 	}
-
-	httpClient := newAntigravityModelsHTTPClient(cfg, auth)
-	if strings.TrimSpace(metaStringValue(auth.Metadata, "project_id")) == "" {
-		discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, 30*time.Second)
-		projectID, errProject := sdkauth.FetchAntigravityProjectID(discoveryCtx, accessToken, httpClient)
-		cancelDiscovery()
-		if errProject != nil {
-			return nil, fmt.Errorf("failed to discover antigravity project_id: %w", errProject)
-		}
-		projectID = strings.TrimSpace(projectID)
-		if projectID == "" {
-			return nil, fmt.Errorf("failed to discover antigravity project_id: empty project ID")
-		}
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
-		}
-		auth.Metadata["project_id"] = projectID
-		if store == nil {
-			return nil, fmt.Errorf("failed to save discovered antigravity project_id: token store is nil")
-		}
-		if _, errSave := store.Save(ctx, auth); errSave != nil {
-			return nil, fmt.Errorf("failed to save discovered antigravity project_id: %w", errSave)
-		}
-	}
-	modelsCtx, cancelModels := context.WithTimeout(ctx, 30*time.Second)
-	defer cancelModels()
 
 	baseURLs := []string{antigravityBaseURLProd, antigravityBaseURLDaily, antigravitySandboxBaseURLDaily}
 
@@ -241,7 +212,7 @@ func fetchModels(ctx context.Context, cfg *config.Config, store *sdkauth.FileTok
 			payload = []byte(`{}`)
 		}
 
-		httpReq, errReq := http.NewRequestWithContext(modelsCtx, http.MethodPost, modelsURL, strings.NewReader(string(payload)))
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, strings.NewReader(string(payload)))
 		if errReq != nil {
 			continue
 		}
@@ -250,6 +221,7 @@ func fetchModels(ctx context.Context, cfg *config.Config, store *sdkauth.FileTok
 		httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 		httpReq.Header.Set("User-Agent", misc.AntigravityUserAgent())
 
+		httpClient := newAntigravityModelsHTTPClient(cfg, auth)
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
 			continue
@@ -308,10 +280,10 @@ func fetchModels(ctx context.Context, cfg *config.Config, store *sdkauth.FileTok
 			models = append(models, entry)
 		}
 
-		return models, nil
+		return models
 	}
 
-	return nil, nil
+	return nil
 }
 
 func newAntigravityModelsHTTPClient(cfg *config.Config, auth *coreauth.Auth) *http.Client {
