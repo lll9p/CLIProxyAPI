@@ -123,7 +123,7 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 	}
 	httpReq.Header = cloneHeader(req.Headers)
 	c.recordHTTPRequest(ctx, cfg, httpReq, req.Body)
-	client := helps.NewProxyAwareHTTPClient(ctx, cfg, c.auth, 0)
+	client := helps.NewRawProxyAwareHTTPClient(ctx, cfg, c.auth, 0)
 	if client == nil {
 		client = &http.Client{}
 	}
