@@ -890,13 +890,24 @@ func (e *XAIWebsocketsExecutor) prepareResponsesWebsocketRequest(ctx context.Con
 }
 
 func (e *XAIWebsocketsExecutor) dialXAIWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
-	dialer := newProxyAwareWebsocketDialer(e.cfg, auth)
-	dialer.HandshakeTimeout = codexResponsesWebsocketHandshakeTO
-	dialer.EnableCompression = true
+	plan, errPrepare := prepareWebsocketDial(e.cfg, auth, wsURL, headers)
+	if errPrepare != nil {
+		return nil, nil, errPrepare
+	}
+	return e.dialXAIWebsocketPlan(ctx, auth, plan)
+}
+
+func (e *XAIWebsocketsExecutor) dialXAIWebsocketPlan(ctx context.Context, auth *cliproxyauth.Auth, plan websocketDialPlan) (*websocket.Conn, *http.Response, error) {
+	var dialer *websocket.Dialer
+	if plan.routed {
+		dialer = newDirectWebsocketDialer()
+	} else {
+		dialer = newProxyAwareWebsocketDialer(e.cfg, auth)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
+	conn, resp, err := dialer.DialContext(ctx, plan.url, plan.headers)
 	if conn != nil {
 		// Avoid gorilla/websocket flate tail validation issues on some upstreams/Go versions.
 		conn.EnableWriteCompression(false)
@@ -938,8 +949,12 @@ func (e *XAIWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-chan 
 }
 
 func (e *XAIWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
+	plan, errPrepare := prepareWebsocketDial(e.cfg, auth, wsURL, headers)
+	if errPrepare != nil {
+		return nil, nil, errPrepare
+	}
 	if sess == nil {
-		return e.dialXAIWebsocket(ctx, auth, wsURL, headers)
+		return e.dialXAIWebsocketPlan(ctx, auth, plan)
 	}
 
 	if staleConn, staleAuthID, staleWSURL := detachMismatchedWebsocketSessionConn(sess, authID, wsURL); staleConn != nil {
@@ -952,19 +967,38 @@ func (e *XAIWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cl
 	sess.connMu.Lock()
 	conn := sess.conn
 	readerConn := sess.readerConn
-	sess.connMu.Unlock()
-	if conn != nil {
-		if readerConn != conn {
-			sess.connMu.Lock()
+	if conn != nil && sess.dialKey == plan.key {
+		startReader := readerConn != conn
+		if startReader {
 			sess.readerConn = conn
-			sess.connMu.Unlock()
+		}
+		sess.connMu.Unlock()
+		if startReader {
 			configureXAIWebsocketConn(sess, conn)
 			go e.readUpstreamLoop(sess, conn)
 		}
 		return conn, nil, nil
 	}
 
-	conn, resp, errDial := e.dialXAIWebsocket(ctx, auth, wsURL, headers)
+	staleConn := conn
+	staleAuthID := sess.authID
+	staleURL := sess.wsURL
+	if staleConn != nil {
+		sess.conn = nil
+		if sess.readerConn == staleConn {
+			sess.readerConn = nil
+		}
+		sess.dialKey = ""
+	}
+	sess.connMu.Unlock()
+	if staleConn != nil {
+		logXAIWebsocketDisconnected(sess.sessionID, staleAuthID, staleURL, "dial_key_changed", nil)
+		if errClose := staleConn.Close(); errClose != nil {
+			log.Errorf("xai websockets executor: close websocket error: %v", errClose)
+		}
+	}
+
+	conn, resp, errDial := e.dialXAIWebsocketPlan(ctx, auth, plan)
 	if errDial != nil {
 		return nil, resp, errDial
 	}
@@ -972,15 +1006,34 @@ func (e *XAIWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cl
 	sess.connMu.Lock()
 	if sess.conn != nil {
 		previous := sess.conn
+		if sess.dialKey == plan.key {
+			sess.connMu.Unlock()
+			if errClose := conn.Close(); errClose != nil {
+				log.Errorf("xai websockets executor: close websocket error: %v", errClose)
+			}
+			return previous, nil, nil
+		}
+		previousAuthID := sess.authID
+		previousURL := sess.wsURL
+		sess.conn = conn
+		sess.wsURL = wsURL
+		sess.authID = authID
+		sess.dialKey = plan.key
+		sess.readerConn = conn
 		sess.connMu.Unlock()
-		if errClose := conn.Close(); errClose != nil {
+		logXAIWebsocketDisconnected(sess.sessionID, previousAuthID, previousURL, "dial_key_changed", nil)
+		if errClose := previous.Close(); errClose != nil {
 			log.Errorf("xai websockets executor: close websocket error: %v", errClose)
 		}
-		return previous, nil, nil
+		configureXAIWebsocketConn(sess, conn)
+		go e.readUpstreamLoop(sess, conn)
+		logXAIWebsocketConnected(sess.sessionID, authID, wsURL)
+		return conn, resp, nil
 	}
 	sess.conn = conn
 	sess.wsURL = wsURL
 	sess.authID = authID
+	sess.dialKey = plan.key
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 
@@ -1044,6 +1097,9 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 	for {
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
+			if !e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead) {
+				return
+			}
 			ch, done := sess.activeForConn(conn)
 			if ch != nil {
 				select {
@@ -1055,13 +1111,15 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 					close(ch)
 				}
 			}
-			e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			return
 		}
 
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
 				errBinary := fmt.Errorf("xai websockets executor: unexpected binary message")
+				if !e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary) {
+					return
+				}
 				ch, done := sess.activeForConn(conn)
 				if ch != nil {
 					select {
@@ -1073,10 +1131,12 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 						close(ch)
 					}
 				}
-				e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 				return
 			}
 			continue
+		}
+		if !sess.isCurrentConn(conn) {
+			return
 		}
 
 		ch, done := sess.activeForConn(conn)
@@ -1090,17 +1150,17 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 	}
 }
 
-func (e *XAIWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) {
-	e.invalidateUpstreamConnWithNotify(sess, conn, reason, err, true)
+func (e *XAIWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) bool {
+	return e.invalidateUpstreamConnWithNotify(sess, conn, reason, err, true)
 }
 
-func (e *XAIWebsocketsExecutor) invalidateUpstreamConnWithoutDisconnectNotify(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) {
-	e.invalidateUpstreamConnWithNotify(sess, conn, reason, err, false)
+func (e *XAIWebsocketsExecutor) invalidateUpstreamConnWithoutDisconnectNotify(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) bool {
+	return e.invalidateUpstreamConnWithNotify(sess, conn, reason, err, false)
 }
 
-func (e *XAIWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error, notify bool) {
+func (e *XAIWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error, notify bool) bool {
 	if sess == nil || conn == nil {
-		return
+		return false
 	}
 
 	sess.connMu.Lock()
@@ -1110,9 +1170,10 @@ func (e *XAIWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWebs
 	sessionID := sess.sessionID
 	if current == nil || current != conn {
 		sess.connMu.Unlock()
-		return
+		return false
 	}
 	sess.conn = nil
+	sess.dialKey = ""
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
@@ -1125,6 +1186,7 @@ func (e *XAIWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWebs
 	if errClose := conn.Close(); errClose != nil {
 		log.Errorf("xai websockets executor: close websocket error: %v", errClose)
 	}
+	return true
 }
 
 func (e *XAIWebsocketsExecutor) CloseExecutionSession(sessionID string) {
@@ -1167,6 +1229,7 @@ func closeXAIWebsocketSession(sess *codexWebsocketSession, reason string) {
 	authID := sess.authID
 	wsURL := sess.wsURL
 	sess.conn = nil
+	sess.dialKey = ""
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
