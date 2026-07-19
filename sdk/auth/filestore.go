@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -286,31 +285,6 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 	if provider == "" {
 		provider = "unknown"
 	}
-	if provider == "antigravity" {
-		projectID := ""
-		if pid, ok := metadata["project_id"].(string); ok {
-			projectID = strings.TrimSpace(pid)
-		}
-		if projectID == "" {
-			accessToken := extractAccessToken(metadata)
-			if accessToken != "" {
-				fetchedProjectID, errFetch := FetchAntigravityProjectID(context.Background(), accessToken, http.DefaultClient)
-				if errFetch == nil && strings.TrimSpace(fetchedProjectID) != "" {
-					metadata["project_id"] = strings.TrimSpace(fetchedProjectID)
-					if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
-						if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
-							_, _ = file.Write(raw)
-							_ = file.Close()
-						}
-					}
-				}
-			}
-		}
-	}
-	info, errStat = os.Stat(path)
-	if errStat != nil {
-		return nil, fmt.Errorf("stat file: %w", errStat)
-	}
 	id := s.idFor(path, baseDir)
 	disabled, _ := metadata["disabled"].(bool)
 	status := cliproxyauth.StatusActive
@@ -443,22 +417,6 @@ func (s *FileTokenStore) baseDirSnapshot() string {
 	s.dirLock.RLock()
 	defer s.dirLock.RUnlock()
 	return s.baseDir
-}
-
-func extractAccessToken(metadata map[string]any) string {
-	if at, ok := metadata["access_token"].(string); ok {
-		if v := strings.TrimSpace(at); v != "" {
-			return v
-		}
-	}
-	if tokenMap, ok := metadata["token"].(map[string]any); ok {
-		if at, ok := tokenMap["access_token"].(string); ok {
-			if v := strings.TrimSpace(at); v != "" {
-				return v
-			}
-		}
-	}
-	return ""
 }
 
 // jsonEqual compares two JSON blobs by parsing them into Go objects and deep comparing.

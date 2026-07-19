@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/resin"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -37,9 +38,15 @@ func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Contex
 		return antigravityModelCapabilityHints{}
 	}
 
-	client := &http.Client{}
+	var fallback http.RoundTripper
 	if transport, _, errProxy := proxyutil.BuildHTTPTransport(s.antigravityModelFetchProxyURL(auth)); errProxy == nil && transport != nil {
-		client.Transport = transport
+		fallback = transport
+	}
+	client := &http.Client{}
+	if s == nil {
+		client.Transport = resin.WrapTransport(nil, auth, fallback)
+	} else {
+		client.Transport = resin.WrapTransport(s.cfg, auth, fallback)
 	}
 
 	for _, baseURL := range antigravityModelBaseURLs(auth) {
