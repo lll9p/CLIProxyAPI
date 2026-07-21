@@ -2,88 +2,97 @@ package auth
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-func TestExtractAccessToken(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		metadata map[string]any
-		expected string
-	}{
-		{
-			"antigravity top-level access_token",
-			map[string]any{"access_token": "tok-abc"},
-			"tok-abc",
-		},
-		{
-			"gemini nested token.access_token",
-			map[string]any{
-				"token": map[string]any{"access_token": "tok-nested"},
-			},
-			"tok-nested",
-		},
-		{
-			"top-level takes precedence over nested",
-			map[string]any{
-				"access_token": "tok-top",
-				"token":        map[string]any{"access_token": "tok-nested"},
-			},
-			"tok-top",
-		},
-		{
-			"empty metadata",
-			map[string]any{},
-			"",
-		},
-		{
-			"whitespace-only access_token",
-			map[string]any{"access_token": "   "},
-			"",
-		},
-		{
-			"wrong type access_token",
-			map[string]any{"access_token": 12345},
-			"",
-		},
-		{
-			"token is not a map",
-			map[string]any{"token": "not-a-map"},
-			"",
-		},
-		{
-			"nested whitespace-only",
-			map[string]any{
-				"token": map[string]any{"access_token": "  "},
-			},
-			"",
-		},
-		{
-			"fallback to nested when top-level empty",
-			map[string]any{
-				"access_token": "",
-				"token":        map[string]any{"access_token": "tok-fallback"},
-			},
-			"tok-fallback",
-		},
+func TestFileTokenStoreListDoesNotDiscoverMissingAntigravityProjectID(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "antigravity.json")
+	original := []byte(`{
+  "type": "antigravity",
+  "access_token": "access-token",
+  "email": "user@example.com",
+  "label": "Antigravity account",
+  "disabled": false
+}`)
+	if errWrite := os.WriteFile(path, original, 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
 	}
 
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := extractAccessToken(tt.metadata)
-			if got != tt.expected {
-				t.Errorf("extractAccessToken() = %q, want %q", got, tt.expected)
-			}
-		})
+	requestCount := 0
+	originalDefaultClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: fileStoreRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"cloudaicompanionProject":"discovered-project"}`)),
+			Request:    req,
+		}, nil
+	})}
+	t.Cleanup(func() {
+		http.DefaultClient = originalDefaultClient
+	})
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, errList := store.List(context.Background())
+	if errList != nil {
+		t.Fatalf("List() error = %v", errList)
+	}
+	if requestCount != 0 {
+		t.Fatalf("List() made %d HTTP requests, want none", requestCount)
+	}
+
+	afterList, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("read auth file: %v", errRead)
+	}
+	if !reflect.DeepEqual(afterList, original) {
+		t.Fatalf("auth file changed during List():\ngot:  %s\nwant: %s", afterList, original)
+	}
+
+	if len(auths) != 1 {
+		t.Fatalf("List() len = %d, want one auth", len(auths))
+	}
+	auth := auths[0]
+	if auth.ID != "antigravity.json" || auth.FileName != "antigravity.json" || auth.Provider != "antigravity" {
+		t.Fatalf("auth identity = ID %q, FileName %q, Provider %q", auth.ID, auth.FileName, auth.Provider)
+	}
+	if auth.Label != "Antigravity account" || auth.Status != cliproxyauth.StatusActive || auth.Disabled {
+		t.Fatalf("auth metadata fields = Label %q, Status %q, Disabled %v", auth.Label, auth.Status, auth.Disabled)
+	}
+	wantMetadata := map[string]any{
+		"type":         "antigravity",
+		"access_token": "access-token",
+		"email":        "user@example.com",
+		"label":        "Antigravity account",
+		"disabled":     false,
+	}
+	if !reflect.DeepEqual(auth.Metadata, wantMetadata) {
+		t.Fatalf("auth Metadata = %#v, want %#v", auth.Metadata, wantMetadata)
+	}
+	if _, exists := auth.Metadata["project_id"]; exists {
+		t.Fatalf("auth Metadata project_id = %#v, want absent", auth.Metadata["project_id"])
+	}
+	if auth.Attributes[cliproxyauth.AttributePath] != path || auth.Attributes[cliproxyauth.AttributeSource] != path {
+		t.Fatalf("auth source attributes = %#v, want path %q", auth.Attributes, path)
+	}
+	if auth.Attributes[cliproxyauth.AttributeSourceBackend] != cliproxyauth.AuthSourceFile {
+		t.Fatalf("auth source backend = %q, want %q", auth.Attributes[cliproxyauth.AttributeSourceBackend], cliproxyauth.AuthSourceFile)
+	}
+	if auth.Attributes["email"] != "user@example.com" {
+		t.Fatalf("auth email attribute = %q, want user@example.com", auth.Attributes["email"])
 	}
 }
 
@@ -220,6 +229,12 @@ func TestFileTokenStoreListPluginHandledEmptySuppressesBuiltin(t *testing.T) {
 }
 
 type fileStoreMultiAuthParserFunc func(context.Context, pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error)
+
+type fileStoreRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f fileStoreRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func (f fileStoreMultiAuthParserFunc) ParseAuth(context.Context, pluginapi.AuthParseRequest) (*cliproxyauth.Auth, bool, error) {
 	return nil, false, nil

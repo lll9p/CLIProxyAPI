@@ -21,6 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/resin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -92,6 +93,7 @@ type codexWebsocketSession struct {
 	connCloser      *websocketConnectionCloser
 	wsURL           string
 	authID          string
+	dialKey         string
 	lifecycleBindMu sync.Mutex
 	lifecycle       cliproxyexecutor.ExecutionLifecycle
 	lifecycleModel  string
@@ -315,6 +317,7 @@ func (s *codexWebsocketSession) detachConnection(conn *websocket.Conn, lifecycle
 		closer = s.connCloser
 		s.conn = nil
 		s.connCloser = nil
+		s.dialKey = ""
 		if s.readerConn == conn {
 			s.readerConn = nil
 		}
@@ -389,6 +392,7 @@ func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID st
 	sess.lifecycleModel = ""
 	sess.conn = nil
 	sess.connCloser = nil
+	sess.dialKey = ""
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
@@ -1153,14 +1157,52 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	return &cliproxyexecutor.StreamResult{Headers: upstreamHeaders, Chunks: out}, nil
 }
 
+type websocketDialPlan struct {
+	url     string
+	headers http.Header
+	key     string
+	routed  bool
+}
+
+func prepareWebsocketDial(cfg *config.Config, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (websocketDialPlan, error) {
+	target, errParse := url.Parse(wsURL)
+	if errParse != nil {
+		return websocketDialPlan{}, errParse
+	}
+
+	dialURL, dialHeaders, dialKey, routed := resin.PrepareWebSocket(cfg, auth, target, headers)
+	plan := websocketDialPlan{url: wsURL, headers: headers, key: dialKey}
+	if !routed {
+		return plan, nil
+	}
+	if dialURL == nil {
+		return websocketDialPlan{}, fmt.Errorf("websocket executor: resin returned a nil routed URL")
+	}
+	plan.url = dialURL.String()
+	plan.headers = dialHeaders
+	plan.routed = true
+	return plan, nil
+}
+
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
-	dialer := newProxyAwareWebsocketDialer(e.cfg, auth)
-	dialer.HandshakeTimeout = codexResponsesWebsocketHandshakeTO
-	dialer.EnableCompression = true
+	plan, errPrepare := prepareWebsocketDial(e.cfg, auth, wsURL, headers)
+	if errPrepare != nil {
+		return nil, nil, nil, errPrepare
+	}
+	return e.dialCodexWebsocketPlan(ctx, auth, plan)
+}
+
+func (e *CodexWebsocketsExecutor) dialCodexWebsocketPlan(ctx context.Context, auth *cliproxyauth.Auth, plan websocketDialPlan) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
+	var dialer *websocket.Dialer
+	if plan.routed {
+		dialer = newDirectWebsocketDialer()
+	} else {
+		dialer = newProxyAwareWebsocketDialer(e.cfg, auth)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
+	conn, resp, err := dialer.DialContext(ctx, plan.url, plan.headers)
 	closer := newWebsocketConnectionCloser(conn)
 	if conn != nil {
 		// Avoid gorilla/websocket flate tail validation issues on some upstreams/Go versions.
@@ -1343,6 +1385,18 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 	}
 
 	return dialer
+}
+
+func newDirectWebsocketDialer() *websocket.Dialer {
+	return &websocket.Dialer{
+		Proxy:             nil,
+		HandshakeTimeout:  codexResponsesWebsocketHandshakeTO,
+		EnableCompression: true,
+		NetDialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
 }
 
 func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
@@ -1904,8 +1958,12 @@ func (e *CodexWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-cha
 }
 
 func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
+	plan, errPrepare := prepareWebsocketDial(e.cfg, auth, wsURL, headers)
+	if errPrepare != nil {
+		return nil, nil, nil, errPrepare
+	}
 	if sess == nil {
-		return e.dialCodexWebsocket(ctx, auth, wsURL, headers)
+		return e.dialCodexWebsocketPlan(ctx, auth, plan)
 	}
 
 	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConn(sess, authID, wsURL); staleConn != nil {
@@ -1924,19 +1982,48 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	conn := sess.conn
 	closer := sess.connCloser
 	readerConn := sess.readerConn
-	sess.connMu.Unlock()
-	if conn != nil {
-		if readerConn != conn {
-			sess.connMu.Lock()
+	if conn != nil && sess.dialKey == plan.key {
+		startReader := readerConn != conn
+		if startReader {
 			sess.readerConn = conn
-			sess.connMu.Unlock()
+		}
+		sess.connMu.Unlock()
+		if startReader {
 			sess.configureConn(conn)
 			go e.readUpstreamLoop(sess, conn)
 		}
 		return conn, closer, nil, nil
 	}
 
-	conn, closer, resp, errDial := e.dialCodexWebsocket(ctx, auth, wsURL, headers)
+	staleConn := conn
+	staleCloser := sess.connCloser
+	staleAuthID := sess.authID
+	staleURL := sess.wsURL
+	staleLifecycle := sess.lifecycle
+	if staleConn != nil {
+		sess.conn = nil
+		sess.connCloser = nil
+		sess.lifecycle = nil
+		sess.lifecycleModel = ""
+		if sess.readerConn == staleConn {
+			sess.readerConn = nil
+		}
+		sess.dialKey = ""
+	}
+	sess.connMu.Unlock()
+	if staleConn != nil {
+		logCodexWebsocketDisconnected(sess.sessionID, staleAuthID, staleURL, "dial_key_changed", nil)
+		if staleCloser != nil {
+			if errClose := staleCloser.Close(); errClose != nil {
+				log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+			}
+		}
+		if staleLifecycle != nil {
+			staleLifecycle.End("dial_key_changed")
+		}
+	}
+
+	conn, closer, resp, errDial := e.dialCodexWebsocketPlan(ctx, auth, plan)
 	if errDial != nil {
 		return nil, closer, resp, errDial
 	}
@@ -1945,16 +2032,44 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	if sess.conn != nil {
 		previous := sess.conn
 		previousCloser := sess.connCloser
-		sess.connMu.Unlock()
-		if errClose := closer.Close(); errClose != nil {
-			log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+		if sess.dialKey == plan.key {
+			sess.connMu.Unlock()
+			if errClose := closer.Close(); errClose != nil {
+				log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+			}
+			return previous, previousCloser, nil, nil
 		}
-		return previous, previousCloser, nil, nil
+		previousAuthID := sess.authID
+		previousURL := sess.wsURL
+		previousLifecycle := sess.lifecycle
+		sess.conn = conn
+		sess.connCloser = closer
+		sess.wsURL = wsURL
+		sess.authID = authID
+		sess.dialKey = plan.key
+		sess.readerConn = conn
+		sess.lifecycle = nil
+		sess.lifecycleModel = ""
+		sess.connMu.Unlock()
+		logCodexWebsocketDisconnected(sess.sessionID, previousAuthID, previousURL, "dial_key_changed", nil)
+		if previousCloser != nil {
+			if errClose := previousCloser.Close(); errClose != nil {
+				log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+			}
+		}
+		if previousLifecycle != nil {
+			previousLifecycle.End("dial_key_changed")
+		}
+		sess.configureConn(conn)
+		go e.readUpstreamLoop(sess, conn)
+		logCodexWebsocketConnected(sess.sessionID, authID, wsURL)
+		return conn, closer, resp, nil
 	}
 	sess.conn = conn
 	sess.connCloser = closer
 	sess.wsURL = wsURL
 	sess.authID = authID
+	sess.dialKey = plan.key
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 
@@ -2010,6 +2125,9 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			}
 			continue
 		}
+		if !sess.isCurrentConn(conn) {
+			return
+		}
 
 		ch, done := sess.activeForConn(conn)
 		if ch == nil {
@@ -2020,6 +2138,16 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		case <-done:
 		}
 	}
+}
+
+func (s *codexWebsocketSession) isCurrentConn(conn *websocket.Conn) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+	s.connMu.Lock()
+	current := s.conn == conn
+	s.connMu.Unlock()
+	return current
 }
 
 func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) {
@@ -2050,6 +2178,7 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWe
 	sess.lifecycleModel = ""
 	sess.conn = nil
 	sess.connCloser = nil
+	sess.dialKey = ""
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
@@ -2141,6 +2270,7 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 	sess.lifecycleModel = ""
 	sess.conn = nil
 	sess.connCloser = nil
+	sess.dialKey = ""
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
