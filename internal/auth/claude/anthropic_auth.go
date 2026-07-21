@@ -135,7 +135,8 @@ type tokenResponse struct {
 // It provides methods for generating authorization URLs, exchanging codes for tokens,
 // and refreshing expired tokens using PKCE for enhanced security.
 type ClaudeAuth struct {
-	httpClient *http.Client
+	httpClient      *http.Client
+	refreshRouteKey string
 }
 
 // NewClaudeAuth creates a new Anthropic authentication service.
@@ -173,6 +174,20 @@ func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth 
 	return &ClaudeAuth{
 		httpClient: NewAnthropicHttpClient(sdkCfg),
 	}
+}
+
+// NewClaudeAuthWithHTTPClient creates a new ClaudeAuth service with the provided HTTP client.
+func NewClaudeAuthWithHTTPClient(httpClient *http.Client, refreshRouteKey ...string) *ClaudeAuth {
+	var routeKey string
+	if len(refreshRouteKey) > 0 {
+		routeKey = strings.TrimSpace(refreshRouteKey[0])
+	}
+	if httpClient == nil {
+		auth := NewClaudeAuth(nil)
+		auth.refreshRouteKey = routeKey
+		return auth
+	}
+	return &ClaudeAuth{httpClient: httpClient, refreshRouteKey: routeKey}
 }
 
 // GenerateAuthURL creates the OAuth authorization URL with PKCE.
@@ -339,7 +354,11 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 		}
 	}
 
-	result, err, _ := claudeRefreshGroup.Do(refreshToken, func() (interface{}, error) {
+	refreshKey := refreshToken
+	if o.refreshRouteKey != "" {
+		refreshKey += "\x00" + o.refreshRouteKey
+	}
+	result, err, _ := claudeRefreshGroup.Do(refreshKey, func() (interface{}, error) {
 		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
 	})
 	if err != nil {

@@ -1739,7 +1739,8 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if refreshToken == "" {
 		return auth, nil
 	}
-	svc := codexauth.NewCodexAuthWithProxyURL(e.cfg, auth.ProxyURL)
+	httpClient := helps.NewProxyAwareHTTPClient(context.Background(), e.cfg, auth, 0)
+	svc := codexauth.NewCodexAuthWithHTTPClient(httpClient, helps.RefreshRouteKey(auth))
 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
 		return nil, err

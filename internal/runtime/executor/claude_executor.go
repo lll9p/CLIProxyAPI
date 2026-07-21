@@ -898,7 +898,8 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if refreshToken == "" {
 		return auth, nil
 	}
-	svc := claudeauth.NewClaudeAuthWithProxyURL(e.cfg, auth.ProxyURL)
+	httpClient := helps.NewUtlsHTTPClient(context.Background(), e.cfg, auth, 0)
+	svc := claudeauth.NewClaudeAuthWithHTTPClient(httpClient, helps.RefreshRouteKey(auth))
 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
 		return nil, err
