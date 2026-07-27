@@ -175,7 +175,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
 	}
-	httpClient.Transport = h.apiCallTransport(auth)
+	httpClient.Transport = h.apiCallOutboundTransport(auth)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -283,7 +283,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallOutboundTransport(auth),
 	}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
