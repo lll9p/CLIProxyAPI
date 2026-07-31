@@ -32,7 +32,8 @@ const (
 // It manages the HTTP client and provides methods for generating authorization URLs,
 // exchanging authorization codes for tokens, and refreshing access tokens.
 type CodexAuth struct {
-	httpClient *http.Client
+	httpClient      *http.Client
+	refreshRouteKey string
 }
 
 var codexRefreshGroup singleflight.Group
@@ -58,6 +59,20 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 	return &CodexAuth{
 		httpClient: util.SetProxy(&sdkCfg, &http.Client{}),
 	}
+}
+
+// NewCodexAuthWithHTTPClient creates a new CodexAuth service instance with the provided HTTP client.
+func NewCodexAuthWithHTTPClient(httpClient *http.Client, refreshRouteKey ...string) *CodexAuth {
+	var routeKey string
+	if len(refreshRouteKey) > 0 {
+		routeKey = strings.TrimSpace(refreshRouteKey[0])
+	}
+	if httpClient == nil {
+		auth := NewCodexAuth(nil)
+		auth.refreshRouteKey = routeKey
+		return auth
+	}
+	return &CodexAuth{httpClient: httpClient, refreshRouteKey: routeKey}
 }
 
 // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).
@@ -194,7 +209,11 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		ctx = context.Background()
 	}
 
-	result, err, _ := codexRefreshGroup.Do(refreshToken, func() (interface{}, error) {
+	refreshKey := refreshToken
+	if o.refreshRouteKey != "" {
+		refreshKey += "\x00" + o.refreshRouteKey
+	}
+	result, err, _ := codexRefreshGroup.Do(refreshKey, func() (interface{}, error) {
 		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
 	})
 	if err != nil {
