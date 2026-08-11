@@ -15,6 +15,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/resin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
@@ -104,13 +105,11 @@ func initAntigravityTransport() {
 	antigravityTransport = cloneTransportWithHTTP11(base)
 }
 
-// newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
-// enforcing HTTP/1.1 by disabling HTTP/2 to perfectly mimic Node.js https defaults.
-// The underlying Transport is a singleton to avoid leaking connection pools.
-func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+// newRawAntigravityHTTPClient creates an HTTP/1.1 Antigravity client without Resin routing.
+func newRawAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	antigravityTransportOnce.Do(initAntigravityTransport)
 
-	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+	client := helps.NewRawProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	// If no transport is set, use the shared HTTP/1.1 transport.
 	if client.Transport == nil {
 		client.Transport = antigravityTransport
@@ -121,6 +120,13 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	if transport, ok := client.Transport.(*http.Transport); ok {
 		client.Transport = cloneTransportWithHTTP11(transport)
 	}
+	return client
+}
+
+// newAntigravityHTTPClient creates an HTTP/1.1 Antigravity client with Resin routing.
+func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	client := newRawAntigravityHTTPClient(ctx, cfg, auth, timeout)
+	client.Transport = resin.WrapTransport(cfg, auth, client.Transport)
 	return client
 }
 
