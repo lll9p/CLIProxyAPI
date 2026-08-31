@@ -114,7 +114,8 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 	refreshToken = strings.TrimSpace(refreshToken)
 
-	result, errRefresh, _ := antigravityRefreshGroup.Do(refreshToken, func() (interface{}, error) {
+	refreshKey := refreshToken + "\x00" + helps.RefreshRouteKey(auth)
+	result, errRefresh, _ := antigravityRefreshGroup.Do(refreshKey, func() (interface{}, error) {
 		return e.refreshTokenSingleFlight(context.WithoutCancel(ctx), auth, refreshToken)
 	})
 	if errRefresh != nil {
