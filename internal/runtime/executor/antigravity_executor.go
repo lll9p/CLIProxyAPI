@@ -17,6 +17,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/resin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
@@ -409,12 +410,8 @@ func antigravityCredentialScope(prefix, secret string) string {
 	return prefix + hex.EncodeToString(digest[:8])
 }
 
-// newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
-// enforcing HTTP/1.1 by disabling HTTP/2 to match the native Antigravity client, which
-// negotiates TLS 1.3 without advertising an ALPN protocol and therefore never uses h2.
-// The underlying Transport is always shared so keep-alive connections survive across
-// requests instead of forcing a fresh TCP + TLS handshake every time.
-func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+// newRawAntigravityHTTPClient creates an HTTP/1.1 Antigravity client without Resin routing.
+func newRawAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	// Native Antigravity reuses one transport across requests. Opt into a
 	// credential-scoped proxy transport only here so other providers keep their
 	// existing lifecycle and different OAuth identities remain isolated.
@@ -422,11 +419,11 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		if transport := antigravityProxiedHTTP11Transport(auth, proxyURL, cfg); transport != nil {
 			return &http.Client{Transport: transport, Timeout: timeout}
 		}
-		// Fall through so NewProxyAwareHTTPClient reports the failure and applies the
+		// Fall through so NewRawProxyAwareHTTPClient reports the failure and applies the
 		// context transport fallback, preserving the previous behavior.
 	}
 
-	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+	client := helps.NewRawProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	// Direct requests share an HTTP/1.1 pool only within the selected credential.
 	if client.Transport == nil {
 		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg)
@@ -448,6 +445,13 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		transport = antigravityBaseTransport
 	}
 	client.Transport = antigravityHTTP11Transport(auth, transport, cfg)
+	return client
+}
+
+// newAntigravityHTTPClient creates an HTTP/1.1 Antigravity client with Resin routing.
+func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	client := newRawAntigravityHTTPClient(ctx, cfg, auth, timeout)
+	client.Transport = resin.WrapTransport(cfg, auth, client.Transport)
 	return client
 }
 

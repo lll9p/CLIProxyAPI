@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/resin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -444,9 +445,9 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 			AuthType:  authType,
 			AuthValue: authValue,
 		})
-		dialer := newProxyAwareSidebandDialer(runtimeConfig, current)
+		dialer, dialTarget, dialHeaders := prepareSidebandDial(runtimeConfig, current, upstreamURL, req.Header)
 		dialer.Subprotocols = websocket.Subprotocols(c.Request)
-		return dialer.DialContext(ctx, upstreamURL, req.Header)
+		return dialer.DialContext(ctx, dialTarget, dialHeaders)
 	}
 
 	upstream, handshakeResponse, errDial := dialUpstream(selected)
@@ -690,6 +691,21 @@ func isNormalWebsocketClose(err error) bool {
 		return true
 	}
 	return websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived)
+}
+
+func prepareSidebandDial(cfg *config.Config, selected *auth.Auth, upstreamURL string, headers http.Header) (*websocket.Dialer, string, http.Header) {
+	target, errParse := url.Parse(upstreamURL)
+	if errParse == nil {
+		dialURL, dialHeaders, _, routed := resin.PrepareWebSocket(cfg, selected, target, headers)
+		if routed && dialURL != nil {
+			return newDirectSidebandDialer(), dialURL.String(), dialHeaders
+		}
+	}
+	return newProxyAwareSidebandDialer(cfg, selected), upstreamURL, headers
+}
+
+func newDirectSidebandDialer() *websocket.Dialer {
+	return &websocket.Dialer{Proxy: nil}
 }
 
 func newProxyAwareSidebandDialer(cfg *config.Config, selected *auth.Auth) *websocket.Dialer {
