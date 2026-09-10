@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/resin"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -48,11 +49,15 @@ func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Contex
 	probeCtx, cancel = context.WithTimeout(probeCtx, antigravityCapabilityProbeTimeout)
 	defer cancel()
 
-	client := &http.Client{
-		Timeout: antigravityCapabilityProbeTimeout,
-	}
+	var fallback http.RoundTripper
 	if transport, _, errProxy := proxyutil.BuildHTTPTransport(s.antigravityModelFetchProxyURL(auth)); errProxy == nil && transport != nil {
-		client.Transport = transport
+		fallback = transport
+	}
+	client := &http.Client{Timeout: antigravityCapabilityProbeTimeout}
+	if s == nil {
+		client.Transport = resin.WrapTransport(nil, auth, fallback)
+	} else {
+		client.Transport = resin.WrapTransport(s.cfg, auth, fallback)
 	}
 
 	baseURLs := antigravityModelBaseURLs(auth)

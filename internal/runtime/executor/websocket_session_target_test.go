@@ -145,7 +145,9 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 				return func(runOpts cliproxyexecutor.Options) error {
 					if !primed {
 						wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/responses"
-						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, http.Header{})
+						headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "test-key", executor.cfg)
+						applyModelHeaderOverrides(headers, "gpt-5-codex")
+						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, headers)
 						if errEnsure != nil {
 							return errEnsure
 						}
@@ -170,7 +172,9 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 				return func(runOpts cliproxyexecutor.Options) error {
 					if !primed {
 						wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/responses"
-						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, http.Header{})
+						headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "test-key", executor.cfg)
+						applyModelHeaderOverrides(headers, "gpt-5-codex")
+						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, headers)
 						if errEnsure != nil {
 							return errEnsure
 						}
@@ -203,7 +207,8 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 				return func(runOpts cliproxyexecutor.Options) error {
 					if !primed {
 						wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/responses"
-						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, http.Header{})
+						headers := applyXAIWebsocketHeaders(context.Background(), http.Header{}, auth, "test-token", "retry-bind")
+						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, headers)
 						if errEnsure != nil {
 							return errEnsure
 						}
