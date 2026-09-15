@@ -29,6 +29,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/resin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -173,10 +174,11 @@ func main() {
 		fmt.Printf("Using auth: id=%s label=%s\n", chosen.ID, chosen.Label)
 		fmt.Println("Fetching Antigravity model list from upstream...")
 
-		fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		models = fetchModels(fetchCtx, chosen)
-		cancel()
-
+		models, err = fetchModelsWithResin(ctx, cfg, fileStore, chosen)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to fetch antigravity models: %v; trying next auth...\n", err)
+			continue
+		}
 		if len(models) > 0 {
 			fmt.Printf("Fetched %d models.\n", len(models))
 			break
@@ -218,6 +220,44 @@ func defaultAntigravityFetchBaseURLs() []string {
 
 func fetchModels(ctx context.Context, auth *coreauth.Auth) []modelEntry {
 	return fetchModelsFromBaseURLs(ctx, auth, defaultAntigravityFetchBaseURLs(), nil)
+}
+
+func fetchModelsWithResin(ctx context.Context, cfg *config.Config, store *sdkauth.FileTokenStore, auth *coreauth.Auth) ([]modelEntry, error) {
+	if auth == nil {
+		return nil, fmt.Errorf("auth is nil")
+	}
+	accessToken := metaStringValue(auth.Metadata, "access_token")
+	if accessToken == "" {
+		return nil, fmt.Errorf("no access token found in auth")
+	}
+
+	httpClient := newAntigravityModelsHTTPClient(cfg, auth)
+	if strings.TrimSpace(metaStringValue(auth.Metadata, "project_id")) == "" {
+		discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, 30*time.Second)
+		projectID, errProject := sdkauth.FetchAntigravityProjectID(discoveryCtx, accessToken, httpClient)
+		cancelDiscovery()
+		if errProject != nil {
+			return nil, fmt.Errorf("failed to discover antigravity project_id: %w", errProject)
+		}
+		projectID = strings.TrimSpace(projectID)
+		if projectID == "" {
+			return nil, fmt.Errorf("failed to discover antigravity project_id: empty project ID")
+		}
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata["project_id"] = projectID
+		if store == nil {
+			return nil, fmt.Errorf("failed to save discovered antigravity project_id: token store is nil")
+		}
+		if _, errSave := store.Save(ctx, auth); errSave != nil {
+			return nil, fmt.Errorf("failed to save discovered antigravity project_id: %w", errSave)
+		}
+	}
+
+	modelsCtx, cancelModels := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelModels()
+	return fetchModelsFromBaseURLs(modelsCtx, auth, defaultAntigravityFetchBaseURLs(), httpClient), nil
 }
 
 func fetchModelsFromBaseURLs(ctx context.Context, auth *coreauth.Auth, baseURLs []string, client *http.Client) []modelEntry {
@@ -285,7 +325,6 @@ func fetchModelsFromBaseURLs(ctx context.Context, auth *coreauth.Auth, baseURLs 
 			}
 
 			var models []modelEntry
-
 			for originalName, modelData := range result.Map() {
 				modelID := strings.TrimSpace(originalName)
 				if modelID == "" {
@@ -321,12 +360,23 @@ func fetchModelsFromBaseURLs(ctx context.Context, auth *coreauth.Auth, baseURLs 
 
 				models = append(models, entry)
 			}
-
 			return models
 		}
 	}
 
 	return nil
+}
+
+func newAntigravityModelsHTTPClient(cfg *config.Config, auth *coreauth.Auth) *http.Client {
+	client := &http.Client{Timeout: 30 * time.Second}
+	var fallback http.RoundTripper
+	if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
+		if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil {
+			fallback = transport
+		}
+	}
+	client.Transport = resin.WrapTransport(cfg, auth, fallback)
+	return client
 }
 
 func metaStringValue(m map[string]interface{}, key string) string {
