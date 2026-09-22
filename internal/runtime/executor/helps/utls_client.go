@@ -16,6 +16,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/resin"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -437,6 +438,13 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 			clientOut.Transport = &tlsHandshakeTimeoutRoundTripper{base: clientOut.Transport, timeout: handshakeTimeout}
 		}
 	}()
+	client := NewRawUtlsHTTPClient(ctx, cfg, auth, timeout)
+	client.Transport = resin.WrapTransport(cfg, auth, client.Transport)
+	return client
+}
+
+// NewRawUtlsHTTPClient creates a uTLS client without Resin routing.
+func NewRawUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
 	var ctxRoundTripper http.RoundTripper

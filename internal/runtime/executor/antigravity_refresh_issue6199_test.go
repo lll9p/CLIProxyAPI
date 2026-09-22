@@ -75,7 +75,9 @@ func TestIssue6199AntigravitySharedOAuthHasIndependentAcquisitionDeadline(t *tes
 		results := make(chan issue6199AntigravityRefreshResult, 2)
 		refreshToken := t.Name() + "-shared-refresh"
 		runRefresh := func(ctx context.Context, id string) {
-			updated, errRefresh := executor.Refresh(ctx, issue6199AntigravityAuth(id, refreshToken))
+			auth := issue6199AntigravityAuth(id, refreshToken)
+			auth.FileName = "issue6199-shared-auth.json"
+			updated, errRefresh := executor.Refresh(ctx, auth)
 			results <- issue6199AntigravityRefreshResult{auth: updated, err: errRefresh}
 		}
 		go runRefresh(callerCtx, "issue6199-oauth-leader")
