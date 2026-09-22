@@ -106,6 +106,7 @@ func (e *DevinExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 	req.Header.Set("Content-Type", "application/connect+proto")
 	req.Header.Set("Connect-Protocol-Version", "1")
 	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Encoding", "identity")
 	// Native devin-cli attaches Sentry-Trace only to chat streaming, omitting it on unary status/catalog calls.
 	isUnary := req.URL != nil && (strings.Contains(req.URL.Path, "GetUserStatus") || strings.Contains(req.URL.Path, "GetCliModelConfigs") || strings.Contains(req.URL.Path, "SeatManagementService"))
 	if !isUnary && req.Header.Get("Sentry-Trace") == "" {

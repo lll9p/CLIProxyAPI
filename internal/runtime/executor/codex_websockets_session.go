@@ -59,6 +59,7 @@ type codexWebsocketSession struct {
 	wsURL                     string
 	authID                    string
 	proxyURL                  string
+	dialKey                   string
 	multiAgentV2OptimizedConn *websocket.Conn
 	lifecycleBindMu           sync.Mutex
 	lifecycle                 cliproxyexecutor.ExecutionLifecycle
@@ -397,6 +398,7 @@ func (s *codexWebsocketSession) detachConnection(conn *websocket.Conn, lifecycle
 		closer = s.connCloser
 		s.conn = nil
 		s.connCloser = nil
+		s.dialKey = ""
 		s.multiAgentV2OptimizedConn = nil
 		if s.readerConn == conn {
 			s.readerConn = nil
@@ -476,6 +478,7 @@ func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID st
 	sess.lifecycleModel = ""
 	sess.conn = nil
 	sess.connCloser = nil
+	sess.dialKey = ""
 	sess.multiAgentV2OptimizedConn = nil
 	if sess.readerConn == conn {
 		sess.readerConn = nil
@@ -640,8 +643,12 @@ func (e *CodexWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-cha
 }
 
 func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
+	plan, errPrepare := prepareWebsocketDial(e.cfg, auth, wsURL, headers)
+	if errPrepare != nil {
+		return nil, nil, nil, errPrepare
+	}
 	if sess == nil {
-		conn, closer, resp, err := e.dialCodexWebsocket(ctx, auth, wsURL, headers)
+		conn, closer, resp, err := e.dialCodexWebsocketPlan(ctx, auth, plan)
 		if conn != nil {
 			configureRawCodexWebsocketConn(conn, authID, wsURL)
 		}
@@ -666,12 +673,13 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	conn := sess.conn
 	closer := sess.connCloser
 	readerConn := sess.readerConn
-	sess.connMu.Unlock()
-	if conn != nil {
-		if readerConn != conn {
-			sess.connMu.Lock()
+	if conn != nil && sess.dialKey == plan.key {
+		startReader := readerConn != conn
+		if startReader {
 			sess.readerConn = conn
-			sess.connMu.Unlock()
+		}
+		sess.connMu.Unlock()
+		if startReader {
 			sess.configureConn(conn)
 			go e.readUpstreamLoop(sess, conn)
 		}
@@ -679,7 +687,36 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 		return conn, closer, nil, nil
 	}
 
-	conn, closer, resp, errDial := e.dialCodexWebsocket(ctx, auth, wsURL, headers)
+	staleConn := conn
+	staleCloser := sess.connCloser
+	staleAuthID := sess.authID
+	staleURL := sess.wsURL
+	staleLifecycle := sess.lifecycle
+	if staleConn != nil {
+		sess.conn = nil
+		sess.connCloser = nil
+		sess.lifecycle = nil
+		sess.lifecycleModel = ""
+		if sess.readerConn == staleConn {
+			sess.readerConn = nil
+		}
+		sess.dialKey = ""
+		sess.multiAgentV2OptimizedConn = nil
+	}
+	sess.connMu.Unlock()
+	if staleConn != nil {
+		logCodexWebsocketDisconnected(sess.sessionID, staleAuthID, staleURL, "dial_key_changed", nil)
+		if staleCloser != nil {
+			if errClose := staleCloser.Close(); errClose != nil {
+				log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+			}
+		}
+		if staleLifecycle != nil {
+			staleLifecycle.End("dial_key_changed")
+		}
+	}
+
+	conn, closer, resp, errDial := e.dialCodexWebsocketPlan(ctx, auth, plan)
 	if errDial != nil {
 		return nil, closer, resp, errDial
 	}
@@ -688,20 +725,49 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	if sess.conn != nil {
 		previous := sess.conn
 		previousCloser := sess.connCloser
-		sess.connMu.Unlock()
-		if errClose := closer.Close(); errClose != nil {
-			log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+		if sess.dialKey == plan.key {
+			sess.connMu.Unlock()
+			if errClose := closer.Close(); errClose != nil {
+				log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+			}
+			return previous, previousCloser, nil, nil
 		}
-		logCodexWebsocketConnectedWithReused(sess, sess.sessionID, authID, wsURL, true)
-		return previous, previousCloser, nil, nil
+		previousAuthID := sess.authID
+		previousURL := sess.wsURL
+		previousLifecycle := sess.lifecycle
+		sess.conn = conn
+		sess.connCloser = closer
+		sess.wsURL = wsURL
+		sess.authID = authID
+		sess.proxyURL = proxyURL
+		sess.dialKey = plan.key
+		sess.readerConn = conn
+		sess.multiAgentV2OptimizedConn = nil
+		sess.lifecycle = nil
+		sess.lifecycleModel = ""
+		sess.connMu.Unlock()
+		logCodexWebsocketDisconnected(sess.sessionID, previousAuthID, previousURL, "dial_key_changed", nil)
+		if previousCloser != nil {
+			if errClose := previousCloser.Close(); errClose != nil {
+				log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+			}
+		}
+		if previousLifecycle != nil {
+			previousLifecycle.End("dial_key_changed")
+		}
+		sess.configureConn(conn)
+		go e.readUpstreamLoop(sess, conn)
+		logCodexWebsocketConnectedWithReused(sess, sess.sessionID, authID, wsURL, false)
+		return conn, closer, resp, nil
 	}
 	sess.conn = conn
 	sess.connCloser = closer
-	sess.multiAgentV2OptimizedConn = nil
 	sess.wsURL = wsURL
 	sess.authID = authID
 	sess.proxyURL = proxyURL
+	sess.dialKey = plan.key
 	sess.readerConn = conn
+	sess.multiAgentV2OptimizedConn = nil
 	sess.connMu.Unlock()
 
 	sess.configureConn(conn)
@@ -758,6 +824,9 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			}
 			continue
 		}
+		if !sess.isCurrentConn(conn) {
+			return
+		}
 
 		payload = bytes.TrimSpace(payload)
 		if len(payload) > 0 {
@@ -788,6 +857,16 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 	}
 }
 
+func (s *codexWebsocketSession) isCurrentConn(conn *websocket.Conn) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+	s.connMu.Lock()
+	current := s.conn == conn
+	s.connMu.Unlock()
+	return current
+}
+
 func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) {
 	e.invalidateUpstreamConnWithNotify(sess, conn, reason, err, true)
 }
@@ -816,6 +895,7 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWe
 	sess.lifecycleModel = ""
 	sess.conn = nil
 	sess.connCloser = nil
+	sess.dialKey = ""
 	sess.multiAgentV2OptimizedConn = nil
 	if sess.readerConn == conn {
 		sess.readerConn = nil
@@ -909,6 +989,7 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 	sess.lifecycleModel = ""
 	sess.conn = nil
 	sess.connCloser = nil
+	sess.dialKey = ""
 	sess.multiAgentV2OptimizedConn = nil
 	if sess.readerConn == conn {
 		sess.readerConn = nil
