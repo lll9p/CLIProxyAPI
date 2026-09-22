@@ -17,6 +17,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/resin"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -242,9 +243,17 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 	if errProxy != nil {
 		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
 	}
+	var fallback http.RoundTripper
 	if transport != nil {
-		client.Transport = transport
+		fallback = transport
 		defer transport.CloseIdleConnections()
+	}
+	if s == nil {
+		client.Transport = resin.WrapTransport(nil, auth, fallback)
+	} else {
+		s.cfgMu.RLock()
+		client.Transport = resin.WrapTransport(s.cfg, auth, fallback)
+		s.cfgMu.RUnlock()
 	}
 	project, _ := auth.Metadata["project_id"].(string)
 	body, errMarshal := json.Marshal(map[string]string{"project": project})
