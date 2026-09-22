@@ -32,6 +32,7 @@ import (
 	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/resin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -132,7 +133,7 @@ func main() {
 
 	fmt.Printf("Using auth: id=%s label=%s\n", chosen.ID, chosen.Label)
 
-	accessToken, refreshed, err := ensureAccessToken(ctx, fileStore, chosen)
+	accessToken, refreshed, err := ensureAccessToken(ctx, fileStore, cfg, chosen)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to prepare codex access token: %v\n", err)
 		os.Exit(1)
@@ -143,7 +144,7 @@ func main() {
 
 	fmt.Println("Fetching Codex model list from upstream...")
 
-	raw, count, err := fetchModels(ctx, chosen, accessToken, clientVersion)
+	raw, count, err := fetchModels(ctx, cfg, chosen, accessToken, clientVersion)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to fetch codex models: %v\n", err)
 		os.Exit(1)
@@ -182,7 +183,7 @@ func findCodexAuth(auths []*coreauth.Auth) *coreauth.Auth {
 	return nil
 }
 
-func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth *coreauth.Auth) (string, bool, error) {
+func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, cfg *config.Config, auth *coreauth.Auth) (string, bool, error) {
 	accessToken := metaStringValue(auth.Metadata, "access_token")
 	if accessToken != "" {
 		if expiresAt, ok := auth.ExpirationTime(); !ok || time.Now().Add(accessTokenRefreshLeeway).Before(expiresAt) {
@@ -198,7 +199,8 @@ func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth 
 		return "", false, fmt.Errorf("missing access_token and refresh_token")
 	}
 
-	svc := codexauth.NewCodexAuthWithProxyURL(nil, auth.ProxyURL)
+	httpClient := newCodexModelsHTTPClient(cfg, auth)
+	svc := codexauth.NewCodexAuthWithHTTPClient(httpClient)
 	tokenData, errRefresh := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if errRefresh != nil {
 		return "", false, errRefresh
@@ -247,7 +249,7 @@ func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth 
 	return tokenData.AccessToken, true, nil
 }
 
-func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVersion string) ([]byte, int, error) {
+func fetchModels(ctx context.Context, cfg *config.Config, auth *coreauth.Auth, accessToken, clientVersion string) ([]byte, int, error) {
 	modelsURL, errURL := codexModelsURL(clientVersion)
 	if errURL != nil {
 		return nil, 0, errURL
@@ -269,12 +271,7 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVe
 		util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
 	}
 
-	httpClient := &http.Client{}
-	if auth != nil {
-		if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
-			httpClient.Transport = transport
-		}
-	}
+	httpClient := newCodexModelsHTTPClient(cfg, auth)
 
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
@@ -370,6 +367,18 @@ func ensureBaselineModel(raw []byte) ([]byte, int, error) {
 	}
 
 	return raw, count, nil
+}
+
+func newCodexModelsHTTPClient(cfg *config.Config, auth *coreauth.Auth) *http.Client {
+	client := &http.Client{}
+	var fallback http.RoundTripper
+	if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
+		if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil {
+			fallback = transport
+		}
+	}
+	client.Transport = resin.WrapTransport(cfg, auth, fallback)
+	return client
 }
 
 func codexModelsURL(clientVersion string) (string, error) {

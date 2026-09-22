@@ -288,7 +288,8 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 		return auth, nil
 	}
 
-	svc := codexauth.NewCodexAuthWithProxyURL(cfg, auth.ProxyURL)
+	httpClient := helps.NewProxyAwareHTTPClient(context.Background(), cfg, auth, 0)
+	svc := codexauth.NewCodexAuthWithHTTPClient(httpClient, helps.RefreshRouteKey(auth))
 
 	outerRefreshed := false
 	var outerErr error
