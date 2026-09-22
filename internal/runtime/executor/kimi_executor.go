@@ -961,10 +961,8 @@ func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	}
 
 	domain := kimiauth.ResolveKimiDomainFromAuth(auth)
-	client := kimiauth.NewDeviceFlowClientWithDomainDeviceIDAndProxyURL(e.cfg, domain, resolveKimiDeviceID(auth), auth.ProxyURL)
-	if httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 30*time.Second); httpClient != nil {
-		client.SetHTTPClient(httpClient)
-	}
+	httpClient := helps.NewProxyAwareHTTPClient(cliproxyexecutor.WithoutRequestProxyURL(ctx), e.cfg, auth, 30*time.Second)
+	client := kimiauth.NewDeviceFlowClientWithDomainDeviceIDAndHTTPClient(domain, resolveKimiDeviceID(auth), httpClient, helps.RefreshRouteKey(auth))
 	td, err := client.RefreshToken(ctx, refreshToken)
 	if err != nil {
 		return nil, err
