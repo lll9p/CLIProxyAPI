@@ -39,7 +39,8 @@ func buildV8Paths() []configPath {
 		{"max-retry-interval", "routing.retry.max-retry-interval"},
 		{"disable-cooling", "routing.cooldown.disable-cooling"}, {"save-cooldown-status", "routing.cooldown.save-cooldown-status"},
 		{"transient-error-cooldown-seconds", "routing.cooldown.transient-error-cooldown-seconds"},
-		{"proxy-url", "requests.proxy-url"}, {"passthrough-headers", "requests.passthrough-headers"},
+		{"proxy-url", "requests.proxy-url"}, {"resin-url", "requests.resin-url"},
+		{"resin-platform-name", "requests.resin-platform-name"}, {"passthrough-headers", "requests.passthrough-headers"},
 		{"nonstream-keepalive-interval", "requests.nonstream-keepalive-interval"}, {"streaming", "requests.streaming"}, {"payload", "requests.payload"},
 		{"auth-dir", "oauth.auth-dir"}, {"auth-auto-refresh-workers", "oauth.auth-auto-refresh-workers"},
 		{"oauth-model-alias", "oauth.model-alias"}, {"oauth-excluded-models", "oauth.excluded-models"},
@@ -185,6 +186,11 @@ func flattenV8(node *yaml.Node) (*yaml.Node, error) {
 		return nil, err
 	}
 	node = expandConfigAliases(node)
+	for _, key := range []string{"resin-url", "resin-platform-name"} {
+		if yamlPath(node, key) != nil {
+			return nil, fmt.Errorf("legacy field %s is not supported; use requests.%s", key, key)
+		}
+	}
 	if _, err := normalizeV8PrivateIPAlias(node, true); err != nil {
 		return nil, err
 	}
@@ -587,7 +593,7 @@ func restoreV8Layout(root, layout *yaml.Node, original []byte, generated *yaml.N
 	for _, path := range v8Paths {
 		upstreams := yamlPath(layout, "api-keys")
 		clientKeyCollision := path.old == "api-keys" && upstreams != nil && upstreams.Kind == yaml.MappingNode
-		if yamlPath(layout, path.current) == nil && !clientKeyCollision {
+		if yamlPath(layout, path.current) == nil && !clientKeyCollision && path.old != "resin-url" && path.old != "resin-platform-name" {
 			continue
 		}
 		value := legacyPath(root, path.old)
