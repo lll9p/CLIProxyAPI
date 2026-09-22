@@ -229,8 +229,8 @@ func TestGetDevinModelsFallback(t *testing.T) {
 		}
 		if m != nil && m.ID == "devin/grok-4-6" {
 			foundGrok46 = true
-			if m.OwnedBy != "xai" {
-				t.Errorf("devin/grok-4-6 OwnedBy = %q, want xai", m.OwnedBy)
+			if m.OwnedBy != "devin" {
+				t.Errorf("devin/grok-4-6 OwnedBy = %q, want devin", m.OwnedBy)
 			}
 		}
 		if m != nil && m.ID == "devin/deepseek-v4-flash" {
