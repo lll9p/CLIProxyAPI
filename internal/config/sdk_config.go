@@ -44,6 +44,12 @@ type SDKConfig struct {
 	// 0, and values beyond the representable duration range saturate.
 	TLSHandshakeTimeoutSeconds int `yaml:"tls-handshake-timeout-seconds" json:"tls-handshake-timeout-seconds"`
 
+	// ResinURL is the base URL of the Resin reverse proxy for supported account provider traffic.
+	ResinURL string `yaml:"resin-url" json:"resin-url"`
+
+	// ResinPlatformName identifies this proxy instance/platform to Resin for sticky account routing.
+	ResinPlatformName string `yaml:"resin-platform-name" json:"resin-platform-name"`
+
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
 	// Supported values:

@@ -215,6 +215,9 @@ func (o *CodexAuth) RefreshSIWCTokens(ctx context.Context, refreshToken, clientI
 	}
 
 	sfKey := clientID + ":" + refreshToken
+	if o.refreshRouteKey != "" {
+		sfKey += "\x00" + o.refreshRouteKey
+	}
 	result, errSF, _ := siwcRefreshGroup.Do(sfKey, func() (any, error) {
 		refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), codexRefreshTimeout)
 		defer cancelRefresh()
