@@ -43,7 +43,7 @@ func (cfg Config) MarshalYAML() (any, error) {
 	}
 	value := reflect.ValueOf(cfg)
 	for _, path := range v8Paths {
-		if !cfg.OAuthOnlyFields[path.old] {
+		if !cfg.OAuthOnlyFields[path.old] && path.old != "resin-url" && path.old != "resin-platform-name" {
 			continue
 		}
 		field := yamlPath(&root, path.old)
