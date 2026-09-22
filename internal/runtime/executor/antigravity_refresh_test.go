@@ -139,6 +139,7 @@ func TestAntigravityRefresh_DeduplicatesConcurrentRefresh(t *testing.T) {
 	executor := &AntigravityExecutor{}
 	authA := &cliproxyauth.Auth{
 		ID:       "auth-a",
+		FileName: "shared-auth.json",
 		Provider: "antigravity",
 		Metadata: map[string]any{
 			"refresh_token": "shared-refresh-token",
@@ -147,6 +148,7 @@ func TestAntigravityRefresh_DeduplicatesConcurrentRefresh(t *testing.T) {
 	}
 	authB := &cliproxyauth.Auth{
 		ID:       "auth-b",
+		FileName: "shared-auth.json",
 		Provider: "antigravity",
 		Metadata: map[string]any{
 			"refresh_token": "shared-refresh-token",
