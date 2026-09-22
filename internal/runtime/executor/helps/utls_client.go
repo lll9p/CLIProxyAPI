@@ -15,6 +15,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/resin"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -396,8 +397,14 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 // fingerprints for protected hosts. It uses Claude Code's Node/OpenSSL profile
 // for Anthropic and a Chrome profile for ChatGPT, with a standard-transport
 // fallback for other hosts.
-func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
-	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
+func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	client := NewRawUtlsHTTPClient(ctx, cfg, auth, timeout)
+	client.Transport = resin.WrapTransport(cfg, auth, client.Transport)
+	return httptransport.Decorate(ctx, client)
+}
+
+// NewRawUtlsHTTPClient creates a uTLS client without Resin routing.
+func NewRawUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
 	var ctxRoundTripper http.RoundTripper
