@@ -117,7 +117,8 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 	refreshToken = strings.TrimSpace(refreshToken)
 
-	result, errRefresh, _ := antigravityRefreshGroup.Do(refreshToken, func() (interface{}, error) {
+	refreshKey := refreshToken + "\x00" + helps.RefreshRouteKey(auth)
+	result, errRefresh, _ := antigravityRefreshGroup.Do(refreshKey, func() (interface{}, error) {
 		// A caller may leave, but shared credential acquisition must still be bounded.
 		refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), antigravityCredentialAcquisitionTimeout)
 		defer cancelRefresh()
