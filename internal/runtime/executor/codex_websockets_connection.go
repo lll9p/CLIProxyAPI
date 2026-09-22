@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/resin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -28,14 +29,52 @@ const (
 	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
 )
 
+type websocketDialPlan struct {
+	url     string
+	headers http.Header
+	key     string
+	routed  bool
+}
+
+func prepareWebsocketDial(cfg *config.Config, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (websocketDialPlan, error) {
+	target, errParse := url.Parse(wsURL)
+	if errParse != nil {
+		return websocketDialPlan{}, errParse
+	}
+
+	dialURL, dialHeaders, dialKey, routed := resin.PrepareWebSocket(cfg, auth, target, headers)
+	plan := websocketDialPlan{url: wsURL, headers: headers, key: dialKey}
+	if !routed {
+		return plan, nil
+	}
+	if dialURL == nil {
+		return websocketDialPlan{}, fmt.Errorf("websocket executor: resin returned a nil routed URL")
+	}
+	plan.url = dialURL.String()
+	plan.headers = dialHeaders
+	plan.routed = true
+	return plan, nil
+}
+
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
-	dialer := newProxyAwareWebsocketDialer(ctx, e.cfg, auth)
-	dialer.HandshakeTimeout = codexResponsesWebsocketHandshakeTO
-	dialer.EnableCompression = true
+	plan, errPrepare := prepareWebsocketDial(e.cfg, auth, wsURL, headers)
+	if errPrepare != nil {
+		return nil, nil, nil, errPrepare
+	}
+	return e.dialCodexWebsocketPlan(ctx, auth, plan)
+}
+
+func (e *CodexWebsocketsExecutor) dialCodexWebsocketPlan(ctx context.Context, auth *cliproxyauth.Auth, plan websocketDialPlan) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
+	var dialer *websocket.Dialer
+	if plan.routed {
+		dialer = newDirectWebsocketDialer()
+	} else {
+		dialer = newProxyAwareWebsocketDialer(ctx, e.cfg, auth)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
+	conn, resp, err := dialer.DialContext(ctx, plan.url, plan.headers)
 	if err != nil {
 		cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	}
@@ -247,6 +286,18 @@ func newProxyAwareWebsocketDialer(ctx context.Context, cfg *config.Config, auth 
 	}
 
 	return dialer
+}
+
+func newDirectWebsocketDialer() *websocket.Dialer {
+	return &websocket.Dialer{
+		Proxy:             nil,
+		HandshakeTimeout:  codexResponsesWebsocketHandshakeTO,
+		EnableCompression: true,
+		NetDialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
 }
 
 func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpwire"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/resin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -510,7 +511,7 @@ func (c *hostHTTPClient) newHTTPClientForRequest(ctx context.Context, cfg *confi
 	baseTransport.DisableKeepAlives = true
 
 	client := &http.Client{
-		Transport: baseTransport,
+		Transport: resin.WrapTransport(cfg, c.auth, baseTransport),
 		CheckRedirect: func(redirectReq *http.Request, via []*http.Request) error {
 			reqHolder.set(redirectReq)
 			baseTransport.CloseIdleConnections()

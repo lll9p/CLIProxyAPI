@@ -15,6 +15,7 @@ import (
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -212,7 +213,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
 	}
-	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
+	httpClient.Transport = h.apiCallOutboundTransport(auth, requestProxyURL)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -310,15 +311,11 @@ func (h *Handler) resolveXAIToken(ctx context.Context, auth *coreauth.Auth, requ
 		return current, nil
 	}
 
-	proxyURL := strings.TrimSpace(requestProxyURL)
-	if proxyURL == "" {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	httpClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: h.apiCallOutboundTransport(auth, requestProxyURL),
 	}
-	var cfg *config.Config
-	if h != nil {
-		cfg = h.cfg
-	}
-	svc := xaiauth.NewXAIAuthWithProxyURL(cfg, proxyURL)
+	svc := xaiauth.NewXAIAuthWithHTTPClient(httpClient, helps.RefreshRouteKey(auth))
 	tokenEndpoint := xaiTokenEndpoint(auth)
 	td, errRefresh := svc.RefreshTokens(ctx, refreshToken, tokenEndpoint)
 	if errRefresh != nil {
@@ -567,7 +564,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth, requestProxyURL),
+		Transport: h.apiCallOutboundTransport(auth, requestProxyURL),
 	}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
